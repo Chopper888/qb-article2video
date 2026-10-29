@@ -1,0 +1,16 @@
+node_modules/
+out/
+dist/
+release/
+.cache/
+.tmp-ui-reference/
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# Machine-local permissions and environment credentials are not project sources.
+/.codex/
+.env
+.env.*

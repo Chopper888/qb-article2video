@@ -1,0 +1,40 @@
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+.cache/
+out/
+dist/
+
+# 构建产物与安装包
+release/
+
+# 引擎运行时副本、日志
+_runtime/
+*.log
+render*.log
+
+# 工作目录与成片（按默认约定放仓库外；若放在仓库内也不会被提交）
+工作/
+成片/
+work/
+output/
+
+# 系统与编辑器杂项
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+*.key
+.desensitize-baseline.json

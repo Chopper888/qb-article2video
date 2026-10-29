@@ -1,0 +1,47 @@
+# APP2：引擎 v5.7 的安装包配置（只换 Runtime Pack 目录，其余同 electron-builder.yml）。由 scripts/packaging/build-installer-v5.7.ps1 调用。
+appId: com.article2video.desktop
+productName: 文章成片
+asar: true
+extraResources:
+  - from: .cache/runtime-pack-v5.7
+    to: runtime-pack-v5.7
+    filter:
+      - '**/*'
+  # APP3W：关于页在安装版里从 resources/licenses/ 打开这两个包的许可文件
+  - from: node_modules/react/LICENSE
+    to: licenses/react/LICENSE
+  - from: node_modules/lucide-react/LICENSE
+    to: licenses/lucide-react/LICENSE
+directories:
+  output: release
+
+# Package compiled application files; builder retains required production dependencies.
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+  - '!**/*.{test,spec}.*'
+  - '!**/test-fixtures/**'
+
+# Reuse the exact Electron dependency; remove its optional demo from generated output only.
+electronDist: node_modules/electron/dist
+afterPack: build/after-pack.cjs
+npmRebuild: false
+publish: null
+forceCodeSigning: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  signExecutable: false
+nsis:
+  artifactName: 文章成片-Setup-${version}.${ext}
+  oneClick: true
+  perMachine: false
+  packElevateHelper: false
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 文章成片

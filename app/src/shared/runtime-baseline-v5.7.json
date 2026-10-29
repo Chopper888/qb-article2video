@@ -1,0 +1,27 @@
+{
+  "version": "v5.7",
+  "engineVersion": "v5.9",
+  "engineCommit": "abec2ef813c4f2dd6150ca517ce22fcddac61463",
+  "engineBranch": "r101",
+  "whitelistFile": "engine-whitelist-v5.7.txt",
+  "whitelistSha256": "45570be9064f71f965bc023ef0b11a2f0eef36828a9b56e39802e14f5610b984",
+  "engineFileCount": 197,
+  "longestRelativePath": "node_modules/.remotion/chrome-headless-shell/win64/chrome-headless-shell-win64/PrivacySandboxAttestationsPreloaded/privacy-sandbox-attestations.dat",
+  "maxTargetCharacters": 240,
+  "ffmpeg": {
+    "version": "n9.0.2-25-g67b60c310b",
+    "filename": "ffmpeg-n9.0.2-25-g67b60c310b-win64-lgpl-shared-9.0.zip",
+    "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-10-13-04/ffmpeg-n9.0.2-25-g67b60c310b-win64-lgpl-shared-9.0.zip",
+    "releaseTag": "autobuild-2026-10-10-13-04",
+    "releasePublishedAt": "2026-10-10T13:05:57Z",
+    "assetId": 627998313,
+    "bytes": 77230479,
+    "cacheDirectory": "ffmpeg",
+    "licenseVariant": "LGPL shared",
+    "linkage": "shared",
+    "repository": "https://github.com/BtbN/FFmpeg-Builds",
+    "sha256": "a68c86127a4185bcb9035d39d54f8b6873681896b860af999d8987be3c696de4",
+    "shaSource": "沿用 v5 assets-lock.json 锁定值（静态版 lgpl 资产已被上游删除，APP2W 经授权改用同版本 shared 版）",
+    "lockedAt": "2026-10-10T20:19:45.160661+00:00"
+  }
+}

@@ -1,0 +1,41 @@
+appId: com.article2video.desktop
+productName: 文章成片
+asar: true
+extraResources:
+  - from: .cache/runtime-pack-v5
+    to: runtime-pack-v5
+    filter:
+      - '**/*'
+directories:
+  output: release
+
+# Package compiled application files; builder retains required production dependencies.
+files:
+  - out/**
+  - package.json
+  - '!**/*.map'
+  - '!**/*.{test,spec}.*'
+  - '!**/test-fixtures/**'
+
+# Reuse the exact Electron dependency; remove its optional demo from generated output only.
+electronDist: node_modules/electron/dist
+afterPack: build/after-pack.cjs
+npmRebuild: false
+publish: null
+forceCodeSigning: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  requestedExecutionLevel: asInvoker
+  signExecutable: false
+nsis:
+  artifactName: 文章成片-Setup-${version}.${ext}
+  oneClick: true
+  perMachine: false
+  packElevateHelper: false
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 文章成片

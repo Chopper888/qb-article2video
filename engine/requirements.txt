@@ -1,0 +1,17 @@
+# Article2Video v4.1 — Python 依赖权威清单（Runtime Pack 用）
+# 对应主体基线：v4.1
+# 对应 commit ：7ec8ae28b54c6bd52e43c4697a83c15304317d31
+# 适用 Python ：3.12（本机实测 3.12.10）
+# 平台        ：Windows x64（cp312-win_amd64）
+# 生成日期    ：2026-10-10
+# 生成方式    ：由已安装环境的元数据导出，未联网解析（importlib.metadata，无 pip download / 无 hash）
+# 说明        ：直接依赖与传递依赖全部锁定；每行行尾标注锁定原因。
+#               未带 --hash：算哈希需下载 wheel，本轮禁止；请由 APP 方打包时用 pip download 自行补算。
+
+certifi==2026.7.22            # 由 requests 引入（requests -> certifi>=2023.5.7）
+charset-normalizer==3.4.9     # 由 requests 引入（requests -> charset_normalizer<4,>=2）
+idna==3.18                    # 由 requests 引入（requests -> idna<4,>=2.5）
+numpy==2.5.1                  # 直接依赖（注：仅被非引擎可达的对账脚本 pipeline/shot_reconcile.py 使用；按 APP 方要求保留，详见说明文件）
+Pillow==12.3.0                # 直接依赖（引擎调用链：pipeline/engine/steps.py、shot_ai.py、shot_director.py）
+requests==2.34.2              # 直接依赖（引擎调用链：pipeline/engine/steps.py、orchestrate.py、shot_ai.py）
+urllib3==2.7.0                # 由 requests 引入（requests -> urllib3<3,>=1.26）

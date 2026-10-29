@@ -1,0 +1,7 @@
+{
+  "version": "v5",
+  "engineCommit": "c949c8bff22e5d5bb365468dda256f19f35e6433",
+  "whitelistSha256": "20771c85986f67d0e9c1088cba1411ad3c733011eb5eb9ca3057b5ab38a5ed2c",
+  "longestRelativePath": "node_modules/.remotion/chrome-headless-shell/win64/chrome-headless-shell-win64/PrivacySandboxAttestationsPreloaded/privacy-sandbox-attestations.dat",
+  "maxTargetCharacters": 240
+}

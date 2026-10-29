@@ -1,0 +1,26 @@
+输入包含一段口播、拆好的信息点，以及据此生成的侧栏标题与条目。请检查并判断。
+
+检查项：
+1. 是否有信息点没写进条目（missing_point）；
+2. 是否有条目读不通（残句、断句）；
+3. title 非空但只是"操作步骤""第一步""总览""说明"这类空泛概括时，empty_title 为 true；title 为空字符串时固定 false；
+4. 条目里是否只有数量、没有实际内容（如"有两个""分三步"），是则 count_only_item 为 true。
+
+要求：
+- 只做判断，不改写文案；
+- 全部没问题（missing_point=false、unreadable 为空、empty_title=false、count_only_item=false）时 verdict 为 "pass"，否则 "fail"；
+- 只输出 JSON，不要 markdown 包裹，不要解释。
+
+输出结构：
+{"missing_point": true/false,
+ "missing_detail": "漏了哪个点；没漏为空",
+ "unreadable": ["读不通的条目原文"],
+ "empty_title": true/false,
+ "empty_title_reason": "…",
+ "count_only_item": true/false,
+ "verdict": "pass 或 fail"}
+
+【口播原文】{{口播原文}}
+【信息点清单】{{信息点}}
+【侧栏标题】{{title}}
+【侧栏条目】{{items}}
