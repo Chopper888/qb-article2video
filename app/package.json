@@ -1,10 +1,10 @@
 {
   "name": "wenzhang-chengpian",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Article2Video desktop shell with Mock and Real v4.1 development integration",
   "main": "./out/main/index.js",
   "author": "Article2Video APP",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
