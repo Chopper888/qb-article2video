@@ -37,10 +37,35 @@ interface Definition extends Omit<ThirdPartyComponent, 'available'> { candidates
 const LICENSE_NAME = /^(license|licence|copying|notice|ofl)([.\-_]|$)/i
 const WHEEL_LICENSES: Record<string, string> = {
   certifi: 'MPL-2.0', 'charset-normalizer': 'MIT', idna: 'BSD-3-Clause', numpy: 'BSD-3-Clause',
-  Pillow: 'MIT-CMU（HPND）', requests: 'Apache-2.0', urllib3: 'MIT'
+  Pillow: 'MIT-CMU（HPND）', requests: 'Apache-2.0', urllib3: 'MIT',
+  // R120M：MOSS 判图依赖（许可取自各 wheel 的 METADATA）
+  'rapidocr-onnxruntime': 'Apache-2.0', onnxruntime: 'MIT', 'opencv-python': 'Apache-2.0', pyclipper: 'MIT', PyYAML: 'MIT',
+  shapely: 'BSD-3-Clause', six: 'MIT', tqdm: 'MPL-2.0 AND MIT', coloredlogs: 'MIT', humanfriendly: 'MIT', flatbuffers: 'Apache-2.0',
+  packaging: 'Apache-2.0 OR BSD-2-Clause', protobuf: 'BSD-3-Clause', sympy: 'BSD-3-Clause', mpmath: 'BSD-3-Clause',
+  colorama: 'BSD-3-Clause', pyreadline3: 'BSD-3-Clause'
 }
 
 const pack = (rel: string, folder = false): Candidate => ({ root: 'packRoot', rel: `licenses/${rel}`, folder })
+
+// electron-updater 6.8.11 的依赖树（版本、许可取自各包 package.json）
+const AUTO_UPDATE_PACKAGES: { pkg: string; name: string; version: string; license: string; file: string }[] = [
+  { pkg: 'electron-updater', name: 'electron-updater（APP 内自动更新）', version: '6.8.11', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'builder-util-runtime', name: 'builder-util-runtime', version: '9.7.0', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'lazy-val', name: 'lazy-val', version: '1.0.5', license: 'MIT', file: '' },
+  { pkg: 'fs-extra', name: 'fs-extra', version: '10.1.0', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'js-yaml', name: 'js-yaml', version: '4.3.2', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'lodash.escaperegexp', name: 'lodash.escaperegexp', version: '4.1.2', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'lodash.isequal', name: 'lodash.isequal', version: '4.5.0', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'semver', name: 'semver', version: '6.3.1', license: 'ISC', file: 'LICENSE' },
+  { pkg: 'tiny-typed-emitter', name: 'tiny-typed-emitter', version: '2.1.0', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'argparse', name: 'argparse', version: '2.0.1', license: 'Python-2.0', file: 'LICENSE' },
+  { pkg: 'debug', name: 'debug', version: '4.4.3', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'ms', name: 'ms', version: '2.1.3', license: 'MIT', file: 'license.md' },
+  { pkg: 'graceful-fs', name: 'graceful-fs', version: '4.2.11', license: 'ISC', file: 'LICENSE' },
+  { pkg: 'jsonfile', name: 'jsonfile', version: '6.2.1', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'universalify', name: 'universalify', version: '2.0.1', license: 'MIT', file: 'LICENSE' },
+  { pkg: 'sax', name: 'sax', version: '1.6.1', license: 'BlueOak-1.0.0', file: 'LICENSE.md' }
+]
 
 export function componentDefinitions(v: ComponentVersions): Definition[] {
   const browserDir = 'node_modules/.remotion/chrome-headless-shell'
@@ -63,7 +88,12 @@ export function componentDefinitions(v: ComponentVersions): Definition[] {
     { id: 'npm-runtime', name: 'Remotion 运行所需的其他 npm 包', version: '—', license: '各自的许可（见许可文件夹）',
       candidates: [pack('runtime/node_modules', true), { root: 'runtimeDir', rel: 'node_modules', folder: true }] },
     { id: 'react', name: 'React', version: '19.3.0', license: 'MIT', candidates: [{ root: 'repoRoot', rel: 'node_modules/react/LICENSE' }, { root: 'resourcesRoot', rel: 'licenses/react/LICENSE' }] },
-    { id: 'lucide', name: 'Lucide 图标（lucide-react）', version: '1.49.0', license: 'ISC', candidates: [{ root: 'repoRoot', rel: 'node_modules/lucide-react/LICENSE' }, { root: 'resourcesRoot', rel: 'licenses/lucide-react/LICENSE' }] }
+    { id: 'lucide', name: 'Lucide 图标（lucide-react）', version: '1.49.0', license: 'ISC', candidates: [{ root: 'repoRoot', rel: 'node_modules/lucide-react/LICENSE' }, { root: 'resourcesRoot', rel: 'licenses/lucide-react/LICENSE' }] },
+    // R121W2：APP 内自动更新（electron-updater）及其随安装包发布的依赖。lazy-val 包里没有许可文件，只有 package.json 的 license 字段。
+    ...AUTO_UPDATE_PACKAGES.map(({ pkg, name, version, license, file }) => ({
+      id: pkg, name, version, license,
+      candidates: file ? [{ root: 'repoRoot' as const, rel: `node_modules/${pkg}/${file}` }, { root: 'resourcesRoot' as const, rel: `licenses/${pkg}/${file}` }] : []
+    }))
   ]
 }
 

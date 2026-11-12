@@ -1,0 +1,238 @@
+{
+ "26": {
+  "class_type": "PrimitiveStringMultiline",
+  "inputs": {
+   "value": "{\"summary\": {\"meta\": [\"illustration\"], \"canvas\": \"single\", \"caption\": \"hand-drawn editorial illustration, black ink line art with a slight natural wobble, flat light grey-white background, colour only in small accents, generous white space, one person comparing two software icons side by side\"}, \"items\": [{\"label\": \"text\", \"caption\": \"Large black hand-lettered main label, the biggest text on the canvas.\", \"text\": \"Codex与Claude Code的区别\", \"bbox\": [-340, -327, -190, 327]}, {\"label\": \"object\", \"caption\": \"hand-drawn editorial illustration, one person comparing two software icons side by side\", \"bbox\": [-46, -300, 199, 299]}], \"bbox_coord_space\": \"abs_centralized\", \"bbox_format\": \"yxyx\"}"
+  },
+  "_meta": {
+   "title": "PrimitiveStringMultiline",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "50": {
+  "class_type": "PrimitiveInt",
+  "inputs": {
+   "value": 1360
+  },
+  "_meta": {
+   "title": "PrimitiveInt",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "51": {
+  "class_type": "PrimitiveInt",
+  "inputs": {
+   "value": 768
+  },
+  "_meta": {
+   "title": "PrimitiveInt",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "52": {
+  "class_type": "PrimitiveInt",
+  "inputs": {
+   "value": 123456789
+  },
+  "_meta": {
+   "title": "PrimitiveInt",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "29": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "Moss\\moss_image_sft_int8_convrot.safetensors",
+   "weight_dtype": "default"
+  },
+  "_meta": {
+   "title": "UNETLoader",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "31": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen3.5_9b_int8_convrot.safetensors",
+   "type": "moss_image",
+   "device": "default"
+  },
+  "_meta": {
+   "title": "CLIPLoader",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "33": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "FLUX\\flux2-vae.safetensors"
+  },
+  "_meta": {
+   "title": "VAELoader",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "39": {
+  "class_type": "SkipLayerGuidanceDiTSimple",
+  "inputs": {
+   "double_layers": "",
+   "single_layers": "22",
+   "start_percent": 0,
+   "end_percent": 0.5,
+   "model": [
+    "29",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "SkipLayerGuidanceDiTSimple",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "30": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "text": [
+    "26",
+    0
+   ],
+   "clip": [
+    "31",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "CLIPTextEncode",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "37": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "text": "nsfw, worst quality, bad anatomy, watermark, jpeg artifact",
+   "clip": [
+    "31",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "CLIPTextEncode",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "36": {
+  "class_type": "EmptyFlux2LatentImage",
+  "inputs": {
+   "width": [
+    "50",
+    0
+   ],
+   "height": [
+    "51",
+    0
+   ],
+   "batch_size": 1
+  },
+  "_meta": {
+   "title": "EmptyFlux2LatentImage",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "32": {
+  "class_type": "KSampler",
+  "inputs": {
+   "steps": 50,
+   "cfg": 3.0,
+   "sampler_name": "euler",
+   "scheduler": "sgm_uniform",
+   "denoise": 1,
+   "seed": [
+    "52",
+    0
+   ],
+   "model": [
+    "39",
+    0
+   ],
+   "positive": [
+    "30",
+    0
+   ],
+   "negative": [
+    "37",
+    0
+   ],
+   "latent_image": [
+    "36",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "KSampler",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "38": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "32",
+    0
+   ],
+   "vae": [
+    "33",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "VAEDecode",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "9": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "filename_prefix": "moss_full_1080p",
+   "images": [
+    "62",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "SaveImage",
+   "workflow_version": "moss-pure-v1"
+  }
+ },
+ "60": {
+  "class_type": "UpscaleModelLoader",
+  "inputs": {
+   "model_name": "4x-UltraSharp.pth"
+  }
+ },
+ "61": {
+  "class_type": "ImageUpscaleWithModel",
+  "inputs": {
+   "upscale_model": [
+    "60",
+    0
+   ],
+   "image": [
+    "38",
+    0
+   ]
+  }
+ },
+ "62": {
+  "class_type": "ImageScale",
+  "inputs": {
+   "image": [
+    "61",
+    0
+   ],
+   "upscale_method": "lanczos",
+   "width": 1920,
+   "height": 1080,
+   "crop": "disabled"
+  }
+ }
+}

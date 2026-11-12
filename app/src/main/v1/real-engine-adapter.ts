@@ -20,6 +20,8 @@ export interface RealEngineOptions {
   location: () => EngineLocation
   secrets: () => Record<string, string>
   deliveryRoot: () => string
+  // R120M P1：出图设置（普通设置），通过 A2V_IMAGE_BACKEND / A2V_MOSS_STYLE / A2V_COMFYUI_URL / A2V_MOSS_FALLBACK_GPT 传给引擎
+  imageSettings?: () => ImageSettings
   // 开发者开关"不付费试跑"：打开时 run / resume 带 --no-paid（只在开发模式出现）
   noPaid: () => boolean
   transport: ProcessTransport
@@ -41,17 +43,23 @@ export interface RealEngineOptions {
   keepAwake?: KeepAwake
 }
 
+export interface ImageSettings { backend: 'gpt' | 'moss_local' | 'moss_rh'; style: string; comfyuiUrl: string; fallbackGpt: boolean }
+
 export interface KeepAwake { start(): number | null; stop(id: number): void }
 
 export interface FinishedRun { op: EngineOp; article: string | null; events: EngineEvent[]; runDone: RunDoneEvent }
 
 const SECRET_VARS = Object.values(KEY_ENV_VARS)
 // 启动引擎时不从 APP 自己的环境继承这些（密钥只用 APP 存的；出图服务切换只给开发者在命令行用）
-const DROPPED = new Set([...SECRET_VARS, 'A2V_IMAGE_SERVICE', 'PYTHONPATH', 'PYTHONHOME', 'PYTHONSTARTUP', 'PYTHONDONTWRITEBYTECODE',
-  'PYTHONIOENCODING', 'A2V_TEMP_DIR', 'A2V_MAX_COST_CNY'])
+// R120M：出图设置的变量同样只用 APP 设置里的值。R121M：A2V_MOSS_RH_CONCURRENCY 引擎已不再读取，
+// APP 也不再传；仍留在这个清单里，保证父环境里残留的旧值不会传给引擎。
+export const IMAGE_ENV_VARS = ['A2V_IMAGE_BACKEND', 'A2V_MOSS_STYLE', 'A2V_COMFYUI_URL', 'A2V_MOSS_FALLBACK_GPT', 'A2V_MOSS_RH_CONCURRENCY'] as const
+// R120M2 Q1：A2V_NODE / A2V_FFMPEG_DIR（渲染用的 node、ffmpeg 绝对路径）也只用 APP 定位到的值。
+const DROPPED = new Set([...SECRET_VARS, ...IMAGE_ENV_VARS, 'A2V_NODE', 'A2V_FFMPEG_DIR', 'A2V_IMAGE_SERVICE', 'PYTHONPATH', 'PYTHONHOME',
+  'PYTHONSTARTUP', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING', 'A2V_TEMP_DIR', 'A2V_MAX_COST_CNY'])
 
 export function buildRunEnvironment(parent: NodeJS.ProcessEnv, secrets: Record<string, string>,
-  options: { workRoot: string; ffmpegDir: string | null; platform: NodeJS.Platform }): NodeJS.ProcessEnv {
+  options: { workRoot: string; ffmpegDir: string | null; nodePath?: string | null; platform: NodeJS.Platform; image?: ImageSettings }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   let pathKey = 'PATH'
   for (const [key, value] of Object.entries(parent)) {
@@ -65,6 +73,18 @@ export function buildRunEnvironment(parent: NodeJS.ProcessEnv, secrets: Record<s
   if (options.ffmpegDir) {
     const sep = options.platform === 'win32' ? ';' : ':'
     env[pathKey] = [options.ffmpegDir, env[pathKey]].filter(Boolean).join(sep)
+    env.A2V_FFMPEG_DIR = options.ffmpegDir
+  }
+  if (options.nodePath) env.A2V_NODE = options.nodePath
+  // R120M P1：出图方式。GPT（默认）时只传 A2V_IMAGE_BACKEND=gpt，其余几项不传（引擎用不到）。
+  // R120M3：MOSS · RH 传风格、补图开关；ComfyUI 地址只对 MOSS 本地传。R121M：RH 同时出图数由引擎自动调节，不再传。
+  const image = options.image
+  const backend = image?.backend === 'moss_local' || image?.backend === 'moss_rh' ? image.backend : 'gpt'
+  env.A2V_IMAGE_BACKEND = backend
+  if (image && backend !== 'gpt') {
+    env.A2V_MOSS_STYLE = image.style
+    env.A2V_MOSS_FALLBACK_GPT = image.fallbackGpt ? '1' : '0'
+    if (backend === 'moss_local') env.A2V_COMFYUI_URL = image.comfyuiUrl
   }
   for (const name of SECRET_VARS) if (secrets[name]) env[name] = secrets[name]
   return env
@@ -250,7 +270,7 @@ export class RealEngineAdapter implements ArticleEngineAdapter {
     const args = buildEngineArgs(argsInput)
     const command: ProcessCommand = {
       executable: location.python, args, cwd: location.root,
-      env: buildRunEnvironment(this.parentEnv, this.options.secrets(), { workRoot, ffmpegDir: location.ffmpegDir ?? null, platform: this.platform }),
+      env: buildRunEnvironment(this.parentEnv, this.options.secrets(), { workRoot, ffmpegDir: location.ffmpegDir ?? null, nodePath: location.nodePath ?? null, platform: this.platform, image: this.options.imageSettings?.() }),
       detached: this.platform !== 'win32'
     }
     const id = `real-${++this.counter}`

@@ -5,6 +5,9 @@ import { configuredCount, KEY_FIELD_IDS, type KeyFieldId, type KeyStatusMap } fr
 import type { ChapterList } from '../../shared/v1/chapters'
 import { missingKeysText, missingRequiredServices } from '../../shared/v1/required-keys'
 import type { TaskRow, VideoItem } from '../../shared/v1/tasks'
+import { AUTO_CHECK_DELAY_MS } from '../../shared/v1/update-check'
+import { initialUpdateState, type UpdateState } from '../../shared/v1/auto-update'
+import { UpdateBar, UpdateDialog, type UpdateActions } from './UpdateBar'
 import { runtimePrepBusy, type AppInfo, type DemoState, type ImportSourceKind, type RuntimePrep, type V1Prefs } from '../../shared/v1/types'
 import type { ExternalLinkId } from '../../shared/v1/links'
 import type { InputResolvedEvent } from '../../shared/v1/protocol'
@@ -21,7 +24,7 @@ import { useFlow } from './use-flow'
 
 type View = { kind: 'onboarding'; step: number } | { kind: 'page'; page: Page } | { kind: 'flow' }
 
-export interface DevOverrides { keyStatus?: KeyStatusMap; reportExpanded?: boolean; runtimePrep?: RuntimePrep }
+export interface DevOverrides { keyStatus?: KeyStatusMap; reportExpanded?: boolean; runtimePrep?: RuntimePrep; update?: UpdateState }
 
 export function AppV1(): React.JSX.Element {
   const [info, setInfo] = useState<AppInfo | null>(null)
@@ -51,6 +54,38 @@ export function AppV1(): React.JSX.Element {
     toastTimer.current = setTimeout(() => setToast(null), 3200)
   }, [])
   const flow = useFlow(message => say(`操作没完成：${message}`), !runtimeBusy)
+
+  // R121M5：APP 内自动更新。状态在 Main，这里只订阅；启动后约 10 秒让 Main 自动检查一次
+  //（设置里关了 Main 就不请求；连不上、没有新版本、跳过的版本都不显示任何东西）。
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null)
+  const [updateDialog, setUpdateDialog] = useState(false)
+  const ready = info !== null
+  useEffect(() => {
+    // 旧的测试替身没有这两个接口：没有就当作没有更新功能
+    const off = window.a2v.onUpdateState?.(setUpdateState)
+    void window.a2v.getUpdateState?.().then(state => setUpdateState(current => current ?? state), () => undefined)
+    return off
+  }, [])
+  useEffect(() => {
+    if (!ready) return
+    const timer = setTimeout(() => { void window.a2v.checkUpdate(false).then(setUpdateState, () => undefined) }, AUTO_CHECK_DELAY_MS)
+    return () => clearTimeout(timer)
+  }, [ready])
+  const shownUpdate = dev.update ?? updateState
+  const updateActions: UpdateActions = {
+    onShowDetails: () => setUpdateDialog(true),
+    // 点"立即更新"：打开小窗口看进度（可以关，关了后台继续）
+    onDownload: () => { setUpdateDialog(true); void window.a2v.downloadUpdate().then(setUpdateState, () => say('没能开始下载')) },
+    onInstall: () => {
+      void window.a2v.installUpdate().then(result => {
+        if (!result.ok) say(result.reason === 'busy' ? '正在出片，出片结束后再安装' : result.reason === 'failed' ? '没能开始安装' : '新版本还没下载好')
+      }, () => say('没能开始安装'))
+    },
+    onLater: () => { void window.a2v.laterUpdate().then(setUpdateState, () => undefined) },
+    onSkip: () => { const version = shownUpdate?.version; void window.a2v.skipUpdate().then(state => { setUpdateState(state); if (version) say(`${version} 不再提醒`) }, () => say('没能保存')) },
+    onRetry: () => { void window.a2v.retryUpdate().then(setUpdateState, () => undefined) },
+    onOpenLink: which => { void window.a2v.openUpdateLink(which).catch(() => say('没能打开浏览器')) }
+  }
 
   useEffect(() => {
     const off = window.a2v.onRuntimePrep(setRuntimePrep)
@@ -122,7 +157,7 @@ export function AppV1(): React.JSX.Element {
     const full = KEY_FIELD_IDS.reduce((acc, id) => ({ ...acc, [id]: { filled: true, last4: id.startsWith('feishu') ? null : 'a1b2' } }), {} as KeyStatusMap)
     const oneMissing = { ...full, feishu_app_secret: { filled: false, last4: null } }
     const oneMissingRequired = { ...full, tts: { filled: false, last4: null }, runninghub: { filled: false, last4: null } }
-    setDev(current => ({ runtimePrep: current.runtimePrep }))
+    setDev(current => ({ runtimePrep: current.runtimePrep, update: current.update }))
     setCheck(current => current)
     const go = async (run: DemoRunScenario): Promise<void> => {
       await window.a2v.setDemoState({ runScenario: run, delayMs: 0 })
@@ -187,10 +222,36 @@ export function AppV1(): React.JSX.Element {
           : kind === 'failed' ? { status: 'failed', error: value ? scene.slice('runtime:failed:'.length) : '复制运行环境失败：ENOSPC: no space left on device, copyfile' } : undefined }))
         break
       }
+      // R121M5：自动更新的显示（只改显示，不动 Main）：update:available、update:downloading:<百分比>、update:downloaded、
+      // update:downloaded-busy（出片中）、update:failed:<download|verify|install|check>、update:latest、update:dialog:on|off、update:off
+      case 'update': {
+        const [, kind, value] = scene.split(':')
+        if (kind === 'dialog') { setUpdateDialog(value !== 'off'); break }
+        const base: UpdateState = { ...initialUpdateState(info?.appVersion ?? '1.2.1'), version: '1.2.2', lastCheckedAt: new Date().toISOString(),
+          notes: ['文章成片 1.2.2', '修复：长文章配音偶尔在最后一段停住', '改进：MOSS · RH 云端出图排队时自动降速，不再整篇失败', '改进：设置页示例小图更清楚'] }
+        const total = 412 * 1024 * 1024
+        const percent = Number(value ?? 42)
+        const made: UpdateState | undefined = kind === 'available' ? { ...base, phase: 'available' }
+          : kind === 'downloading' ? { ...base, phase: 'downloading', percent, transferredBytes: Math.round(total * percent / 100), totalBytes: total }
+            : kind === 'downloaded' ? { ...base, phase: 'downloaded', percent: 100, installOnQuit: true }
+              : kind === 'downloaded-busy' ? { ...base, phase: 'downloaded', percent: 100, installOnQuit: true, busy: true }
+                : kind === 'failed' ? { ...base, phase: 'failed', failStage: value === 'verify' || value === 'install' || value === 'check' ? value : 'download', manual: value === 'check' }
+                  : kind === 'latest' ? { ...base, phase: 'latest', version: null, notes: [], manual: true }
+                    : undefined
+        setDev(current => ({ ...current, update: made }))
+        if (!made) setUpdateDialog(false)
+        break
+      }
       // APP2b：点页面上文字等于 arg 的按钮（截"查看详情"展开用）
       case 'click': Array.from(document.querySelectorAll('button')).find(button => button.textContent?.trim() === arg)?.click(); break
+      // R121M：改一项普通设置（截下拉框的不同选项用），例如 prefs:imageBackend=moss_rh、prefs:mossStyle=S4
+      case 'prefs': {
+        const [key, value] = (arg ?? '').split('=')
+        if (key === 'imageBackend' || key === 'mossStyle') await updatePrefs({ [key]: value } as Partial<V1Prefs>)
+        break
+      }
     }
-  }, [flow, prefs?.maxCostCny, runCheck, updatePrefs])
+  }, [flow, info?.appVersion, prefs?.maxCostCny, runCheck, updatePrefs])
 
   useEffect(() => window.a2v.onDevScene(scene => { void applyScene(scene) }), [applyScene])
 
@@ -213,7 +274,14 @@ export function AppV1(): React.JSX.Element {
   ].join('\n')
 
   const prepNotice = <RuntimePrepNotice prep={shownPrep} onRetry={retryRuntime} />
-  const handleGuide = (action: GuideAction, value?: number): void => {
+  // R120M P2：导出诊断报告（.md，默认存桌面）
+  const exportReport = (): void => {
+    void window.a2v.exportDiagnosticsReport().then(outcome => {
+      if (outcome.ok) say(`诊断报告已保存：${outcome.file}（不含密钥，可以直接发给作者）`)
+      else if (!outcome.canceled) say(outcome.error ?? '导出失败')
+    }, (reason: unknown) => say(reason instanceof Error ? reason.message : String(reason)))
+  }
+  const handleGuide = (action: GuideAction, value?: number, link?: ExternalLinkId): void => {
     const current = flow.flow
     // APP3：运行环境准备好之前不能"继续"（按钮已经不能点，这里再拦一次）
     if (runtimeBusy && (action === 'resume' || action === 'raise_limit')) { say('运行环境还在准备，好了再继续'); return }
@@ -228,6 +296,9 @@ export function AppV1(): React.JSX.Element {
       case 'copy_diagnostics': void navigator.clipboard?.writeText(diagnostics).then(() => say('诊断信息已复制（不含密钥）'), () => say('没能复制')); break
       case 'open_logs': openFolder('logs'); break
       case 'dismiss': navigate('home'); break
+      case 'export_report': exportReport(); break
+      case 'open_link': if (link) openLink(link); break
+      case 'open_image_settings': setTab('general'); setView({ kind: 'page', page: 'settings' }); break
     }
   }
 
@@ -289,7 +360,7 @@ export function AppV1(): React.JSX.Element {
         runninghubLine={rhCheck ? { text: rhCheck.status === 'ok' ? '密钥可用' : rhCheck.status === 'missing' ? '未填写' : '有问题，去检测', tone: rhCheck.status === 'ok' ? 'tone-ok' : 'tone-warn' } : { text: shownKeys.runninghub.filled ? '已填写' : '未填写', tone: shownKeys.runninghub.filled ? 'muted' : 'tone-warn' }}
         onBack={() => navigate('home')} onConfirm={max => { if (!runtimeBusy) void flow.confirmRun(max) }} runtimeBusy={runtimeBusy} runtimeNotice={prepNotice} />
     } else {
-      inner = <Workbench key={current.startedAt} title={current.title} view={current.view} maxCostCny={current.maxCostCny} estimate={current.estimate} ended={current.ended} stopping={current.stopping} reportExpanded={dev.reportExpanded}
+      inner = <Workbench key={current.startedAt} title={current.title} view={current.view} maxCostCny={current.maxCostCny} imageBackend={prefs?.imageBackend ?? null} estimate={current.estimate} ended={current.ended} stopping={current.stopping} reportExpanded={dev.reportExpanded}
         resumeBlocked={runtimeBusy} runtimeNotice={prepNotice}
         onAction={handleGuide} onStop={() => void flow.stop()} onOpenOutput={() => openFolder('output')} onNext={() => navigate('home')} onRemake={remakeCurrent} />
     }
@@ -310,7 +381,8 @@ export function AppV1(): React.JSX.Element {
         {page === 'library' && <LibraryPage outputDir={prefs.outputDir} onOpenFolder={() => openFolder('output')} onPlay={setPlaying} />}
         {page === 'settings' && <SettingsPage tab={tab} onTab={setTab} keys={keysProps} prefs={prefs} info={info} lightAvailable={LIGHT_THEME_AVAILABLE}
           onPrefs={patch => void updatePrefs(patch)} onChooseFolder={target => void chooseFolder(target)} onOpenLogs={() => openFolder('logs')}
-          onRecheckEnv={() => void window.a2v.getAppInfo().then(setInfo)} onToast={say} diagnostics={diagnostics} />}
+          onRecheckEnv={() => void window.a2v.getAppInfo().then(setInfo)} onToast={say} diagnostics={diagnostics}
+          update={shownUpdate} updateActions={updateActions} onCheckUpdate={() => window.a2v.checkUpdate(true).then(setUpdateState)} />}
       </>
     )
   }
@@ -320,8 +392,11 @@ export function AppV1(): React.JSX.Element {
   return (
     <div className={noPaidOn ? 'v1 has-dev-banner' : 'v1'}>
       {noPaidOn && <div className="dev-banner" role="status">开发者：不付费试跑已打开</div>}
+      {view.kind !== 'onboarding' && <UpdateBar state={shownUpdate} actions={updateActions} />}
       {body}
       <Toast text={toast} />
+      {updateDialog && shownUpdate && ['available', 'downloading', 'downloaded', 'failed'].includes(shownUpdate.phase) && view.kind !== 'onboarding'
+        && <UpdateDialog state={shownUpdate} actions={updateActions} onClose={() => setUpdateDialog(false)} />}
       {playing && (
         <div className="overlay" onClick={() => setPlaying(null)}>
           <div className="dialog" role="dialog" aria-label={playing.title} onClick={event => event.stopPropagation()} style={{ maxWidth: 'none' }}>

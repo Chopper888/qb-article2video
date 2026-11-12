@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { errorGuide, type GuideAction } from '../../../shared/v1/error-kinds'
+import type { ExternalLinkId } from '../../../shared/v1/links'
 import type { EstimateEvent } from '../../../shared/v1/protocol'
 import { runPhase, stepIndex, type RunView } from '../../../shared/v1/run-model'
 import { stepName } from '../../../shared/v1/steps'
@@ -11,6 +12,8 @@ export interface WorkbenchProps {
   title: string
   view: RunView
   maxCostCny: number
+  // R120M3：当前出图方式（MOSS · RH 时 RunningHub 失败提示里加"也可以切到 GPT 或 MOSS 本地"）
+  imageBackend?: string | null
   estimate: EstimateEvent | null
   ended: boolean
   // 点了停止、引擎还在收尾（APP2b）
@@ -19,7 +22,7 @@ export interface WorkbenchProps {
   // APP3：运行环境还没准备好——"继续"类按钮不能点，提示框上面显示准备进度
   resumeBlocked?: boolean
   runtimeNotice?: React.ReactNode
-  onAction(action: GuideAction, value?: number): void
+  onAction(action: GuideAction, value?: number, link?: ExternalLinkId): void
   onStop(): void
   onOpenOutput(): void
   onNext(): void
@@ -46,7 +49,7 @@ function useNow(active: boolean): number {
   return now
 }
 
-export function Workbench({ title, view, maxCostCny, estimate, ended, stopping, reportExpanded, resumeBlocked = false, runtimeNotice, onAction, onStop, onOpenOutput, onNext, onRemake }: WorkbenchProps): React.JSX.Element {
+export function Workbench({ title, view, maxCostCny, imageBackend = null, estimate, ended, stopping, reportExpanded, resumeBlocked = false, runtimeNotice, onAction, onStop, onOpenOutput, onNext, onRemake }: WorkbenchProps): React.JSX.Element {
   const phase = runPhase(view)
   const live = phase === 'running' || phase === 'retrying' || phase === 'idle'
   const [observedAt] = useState(Date.now())
@@ -62,7 +65,7 @@ export function Workbench({ title, view, maxCostCny, estimate, ended, stopping, 
   const failure = view.failure
   const guide = phase === 'failed' || phase === 'stopped'
     ? errorGuide(failure?.errorKind ?? view.runDone?.error_kind, { stepName: stepName(failure?.step, view.contentType), missingKeys: view.runDone?.missing_keys, maxCostCny,
-      service: failure?.service ?? view.runDone?.service ?? null })
+      service: failure?.service ?? view.runDone?.service ?? null, providerMessage: failure?.providerMessage ?? view.runDone?.provider_message ?? null, imageBackend })
     : null
   const missing = view.report?.items.filter(item => item.kind === 'illustration_missing') ?? []
   const reds = view.report?.items.filter(item => item.level === 'red') ?? []

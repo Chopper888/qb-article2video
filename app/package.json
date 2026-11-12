@@ -18,6 +18,7 @@
     "dist:win": "npm run runtime:verify && npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
+    "electron-updater": "6.8.11",
     "lucide-react": "1.49.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"

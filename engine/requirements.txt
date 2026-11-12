@@ -15,3 +15,27 @@ numpy==2.5.1                  # 直接依赖（注：仅被非引擎可达的对
 Pillow==12.3.0                # 直接依赖（引擎调用链：pipeline/engine/steps.py、shot_ai.py、shot_director.py）
 requests==2.34.2              # 直接依赖（引擎调用链：pipeline/engine/steps.py、orchestrate.py、shot_ai.py）
 urllib3==2.7.0                # 由 requests 引入（requests -> urllib3<3,>=1.26）
+
+# ---- R120M：MOSS 本地出图的判图依赖（只在出图方式为 MOSS 本地时才 import；GPT 方式不加载）----
+# 直接依赖版本以 Hermes 交付-v1《证据/05-环境与依赖版本》为准；传递依赖由 2026-11-10 在 Mac 上
+# `pip download rapidocr-onnxruntime==1.4.4 onnxruntime==1.22.0 numpy==2.5.1 Pillow==12.3.0` 解析得出，
+# Windows（cp312-win_amd64）由 R120W 打包时用同一组版本 pip download 核对。
+# 注：Hermes 实测环境 numpy 为 1.26.4；本清单沿用引擎已锁的 numpy 2.5.1（onnxruntime 1.22 支持 numpy 2），
+#     判图口径需 R120W 在 Windows 上用 Hermes 校准图复核一次。
+rapidocr-onnxruntime==1.4.4   # 直接依赖（pipeline/vendor/moss/ocr_gate.py，MOSS 判图；自带 PP-OCRv4 模型约 16MB）
+onnxruntime==1.22.0           # 直接依赖（rapidocr 推理后端，纯 CPU）
+opencv-python==5.0.0.93       # 由 rapidocr-onnxruntime 引入（opencv_python>=4.5.1.48）
+pyclipper==1.4.0              # 由 rapidocr-onnxruntime 引入
+PyYAML==6.0.3                 # 由 rapidocr-onnxruntime 引入
+Shapely==2.2.0                # 由 rapidocr-onnxruntime 引入
+six==1.17.0                   # 由 rapidocr-onnxruntime 引入
+tqdm==4.70.1                  # 由 rapidocr-onnxruntime 引入
+coloredlogs==15.0.1           # 由 onnxruntime 引入
+humanfriendly==10.0           # 由 coloredlogs 引入
+flatbuffers==25.12.19         # 由 onnxruntime 引入
+packaging==26.3               # 由 onnxruntime 引入
+protobuf==7.36.2              # 由 onnxruntime 引入
+sympy==1.14.0                 # 由 onnxruntime 引入
+mpmath==1.3.0                 # 由 sympy 引入
+colorama==0.4.6               # 由 tqdm 引入（只在 Windows：platform_system == "Windows"）
+pyreadline3==3.5.6            # 由 humanfriendly 引入（只在 Windows：sys_platform == "win32"）

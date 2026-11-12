@@ -70,7 +70,7 @@ def _extract_frame(mp4, frame, fps, tmpdir):
     t = frame / fps
     out = os.path.join(tmpdir, f"f{frame}.jpg")
     r = subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(mp4),
+        [paths.ffmpeg_exe("ffmpeg"), "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(mp4),
          "-frames:v", "1", out],
         capture_output=True, timeout=120)
     if r.returncode != 0 or not os.path.isfile(out):

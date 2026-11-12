@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, Notification, powerSaveBlocker, protocol, safeStorage, shell } from 'electron'
 import type { IpcMainInvokeEvent } from 'electron'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IPC } from '../shared/ipc'
 import type { AppSettings, CreateTaskInput, Diagnostics } from '../shared/types'
@@ -26,18 +26,22 @@ import { describeEngine, readEngineVersion, resolveDevEngineLocation, type Engin
 import { EngineKeyCheck } from './v1/key-check-runner'
 import { defaultPrefs, PrefsStore } from './v1/prefs-store'
 import { registerV1Ipc } from './v1/register-v1'
+import { AutoUpdateService, FEED_ENV, parseFeedOverride } from './v1/auto-updater'
+import { loadElectronUpdaterBackend } from './v1/electron-updater-backend'
 import { SecretStore } from './v1/secret-store'
 import { RealEngineAdapter, type FinishedRun } from './v1/real-engine-adapter'
 import { RoutedEngineAdapter } from './v1/routed-adapter'
 import { cleanupPreview, deleteTask, deleteTaskCheck, diskUsage, listVideos, readArticleTitle, readReportSummary, readTaskFacts, runCleanup, scanTasks, videoArticle } from './v1/work-scan'
 import { coverDataUrl, probeDuration } from './v1/media'
 import { collectDiagnostics, writeDiagnosticsZip } from './v1/diagnostics-zip'
+import { APP_LOG_TAIL, buildDiagnosticsReport, collectRecentTasks, redact, reportLeaks, tailLines } from './v1/diagnostics-report'
 import { RuntimePreparer } from './v1/runtime-copy'
 import { createLicenseCatalog, packagedLicenseRoots, versionsFromAssets, type LicenseRoots } from './v1/licenses'
 import { resolveRuntimeDirectory } from './runtime-workspace'
 import { NodeProcessTransport } from '../engine/process-transport'
 import { TaskkillProcessTreeTerminator } from '../engine/process-tree-terminator'
 import { errorGuide } from '../shared/v1/error-kinds'
+import { KEY_SERVICES } from '../shared/v1/keys'
 import { IPC_V1, MEDIA_SCHEME } from '../shared/v1/ipc'
 import type { VideoItem } from '../shared/v1/tasks'
 import type { AppInfo } from '../shared/v1/types'
@@ -61,7 +65,9 @@ const readiness = new EnvironmentReadinessService(paths, resources, process.env,
 // 安装版的 runtimeDir 在复制完成后才填（见 setupV1 里的 ensureRuntimeCopy）
 const engineLocation: EngineLocation = paths.isPackaged
   ? { root: resources?.engineRoot ?? null, python: resources?.pythonExecutable ?? null,
-      runtimeDir: null, ffmpegDir: resources && 'ffmpegBin' in resources ? (resources as { ffmpegBin: string }).ffmpegBin : null }
+      runtimeDir: null, ffmpegDir: resources && 'ffmpegBin' in resources ? (resources as { ffmpegBin: string }).ffmpegBin : null,
+      // R120M2 Q1：渲染用运行包自带的 node（1.1.0 没传，也没放进 PATH，没装 Node.js 的电脑 S10 必败）
+      nodePath: resources && 'nodeRoot' in resources ? win32.join((resources as { nodeRoot: string }).nodeRoot, 'node.exe') : null }
   : resolveDevEngineLocation(paths.resourcesRoot)
 const devTools = !paths.isPackaged || process.env.A2V_DEV_TOOLS === '1'
 const appLog = createAppLog(join(paths.userDataRoot, 'logs'))
@@ -250,6 +256,7 @@ function setupV1(): void {
     location: () => engineLocation,
     secrets: () => secrets.engineEnv(),
     deliveryRoot: () => prefs.get().outputDir,
+    imageSettings: () => { const p = prefs.get(); return { backend: p.imageBackend, style: p.mossStyle, comfyuiUrl: p.comfyuiUrl, fallbackGpt: p.mossFallbackGpt } },
     noPaid: () => noPaid.enabled,
     // APP4：出片期间阻止电脑睡眠（显示器照常可以关）
     keepAwake: {
@@ -276,8 +283,24 @@ function setupV1(): void {
   const coverDir = join(paths.userDataRoot, 'covers')
   const activeArticle = (): string | null => real.activeRun()?.article ?? null
   const licenses = createLicenseCatalog(licenseRoots(), componentVersions())
+  // R121M5：APP 内自动更新（electron-updater，只在安装版装载；开发模式不检查）。
+  // 更新源固定是安装目录里的 resources/app-update.yml（GitHub Release）；只有环境变量 A2V_UPDATE_FEED_URL 能临时改成测试地址，
+  // 不读任何用户配置文件。出片进行中不允许"重启安装"；这里不会主动退出软件。
+  const feedOverride = parseFeedOverride(process.env[FEED_ENV])
+  if (process.env[FEED_ENV] && !feedOverride) appLog.write(`自动更新：环境变量 ${FEED_ENV} 不是合法的 http(s) 地址，已忽略`)
+  const updates = new AutoUpdateService({
+    currentVersion: app.getVersion(),
+    backend: () => paths.isPackaged ? loadElectronUpdaterBackend({ log: appLog.write, feedUrl: feedOverride }) : null,
+    autoCheck: () => prefs.get().autoCheckUpdate,
+    ignoredVersion: () => prefs.get().ignoredUpdateVersion,
+    setIgnoredVersion: version => { prefs.update({ ignoredUpdateVersion: version }) },
+    busy: () => real.activeRun() !== null || legacyActive(),
+    log: appLog.write,
+    stateFile: join(paths.userDataRoot, 'update-state.json'),
+    feedOverridden: paths.isPackaged && !!feedOverride
+  })
   registerV1Ipc({
-    window: () => mainWindow, appInfo, prefs, secrets, articles, demo: devTools ? demo : null, noPaid,
+    window: () => mainWindow, appInfo, prefs, secrets, articles, demo: devTools ? demo : null, noPaid, updates,
     extras: {
       runtimePrep: () => preparer?.get() ?? { status: 'not_needed' },
       retryRuntimePrep: () => preparer ? preparer.retry() : Promise.resolve({ status: 'not_needed' }),
@@ -327,13 +350,63 @@ function setupV1(): void {
           },
           logsDir, lastEvents: lastRun?.events ?? null, lastReportFile: reportFile
         })
+        // R120M P2：zip 里的文字同样脱敏（形似密钥的串、用户主目录）；密钥全文扫描仍在 writeDiagnosticsZip 里兜底
+        const redactOptions = { homes: [app.getPath('home'), process.env.USERPROFILE ?? '', process.env.HOME ?? ''], secrets: Object.values(secrets.engineEnv()) }
+        const cleaned = entries.map(entry => ({ name: entry.name, data: Buffer.from(redact(entry.data.toString('utf8'), redactOptions), 'utf8') }))
         try {
-          const written = writeDiagnosticsZip(target, entries, Object.values(secrets.engineEnv()))
+          const written = writeDiagnosticsZip(target, cleaned, Object.values(secrets.engineEnv()))
           appLog.write(`诊断信息已导出（${written.entries.length} 项，${written.bytes} 字节）`)
           return { ok: true, file: target, ...written }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           appLog.write(`诊断信息导出失败：${message}`)
+          return { ok: false, error: message }
+        }
+      },
+      desktopDir: () => app.getPath('desktop'),
+      // R120M P2：诊断报告（.md）
+      exportDiagnosticsReport: async target => {
+        const info = appInfo()
+        const p = prefs.get()
+        const os = await import('node:os')
+        const { existsSync } = await import('node:fs')
+        const keyStatus = secrets.status()
+        const prep = preparer?.get() ?? { status: 'not_needed' as const }
+        const input = {
+          generatedAt: new Date(),
+          basics: {
+            appVersion: info.appVersion, packaged: info.isPackaged, engineVersion: info.engine.version,
+            engineStatus: info.engine.status, engineProblems: info.engine.problems,
+            osName: typeof os.version === 'function' ? os.version() : process.platform, osRelease: os.release(), arch: process.arch,
+            runtimeChecks: [
+              { name: '引擎目录与 Python', ok: info.engine.status === 'ready', detail: info.engine.status === 'ready' ? '找得到' : info.engine.problems.join('；') },
+              { name: '运行环境准备', ok: prep.status === 'ready' || prep.status === 'not_needed', detail: ({ not_needed: '不需要（开发模式或已就绪）', ready: '已就绪', copying: '正在准备', failed: '准备失败' } as Record<string, string>)[prep.status] ?? prep.status },
+              { name: 'ffmpeg', ok: !!engineLocation.ffmpegDir, detail: engineLocation.ffmpegDir ? '找得到' : '没有单独的 ffmpeg 目录' },
+              { name: '工作文件夹', ok: existsSync(p.workDir), detail: p.workDir },
+              { name: '成片保存位置', ok: existsSync(p.outputDir), detail: p.outputDir }
+            ],
+            imageBackend: p.imageBackend, mossStyle: p.mossStyle, comfyuiUrl: p.comfyuiUrl, mossFallbackGpt: p.mossFallbackGpt,
+            keys: KEY_SERVICES.flatMap(service => service.fields.map(field => ({ name: service.fields.length > 1 ? `${service.name} ${field.label}` : service.name, filled: keyStatus[field.id].filled }))),
+            maxCostCny: p.maxCostCny, lastKeyCheck: p.lastKeyCheck
+          },
+          tasks: collectRecentTasks(p.workDir, activeArticle()),
+          update: updates.diagnostics(),
+          appLogTail: tailLines(appLog.file, APP_LOG_TAIL)
+        }
+        const allSecrets = Object.values(secrets.engineEnv())
+        const text = buildDiagnosticsReport(input, { homes: [app.getPath('home'), process.env.USERPROFILE ?? '', process.env.HOME ?? ''], secrets: allSecrets })
+        if (reportLeaks(text, allSecrets)) {
+          appLog.write('诊断报告导出失败：报告里发现了密钥，已拒绝导出')
+          return { ok: false, error: '诊断报告里发现了密钥，已拒绝导出' }
+        }
+        try {
+          const { writeFileSync } = await import('node:fs')
+          writeFileSync(target, text, 'utf8')
+          appLog.write(`诊断报告已导出（${Buffer.byteLength(text)} 字节）`)
+          return { ok: true, file: target, bytes: Buffer.byteLength(text), entries: [target.split(/[\\/]/).pop() ?? target] }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          appLog.write(`诊断报告导出失败：${message}`)
           return { ok: false, error: message }
         }
       }
@@ -385,4 +458,9 @@ function guardQuit(event: { preventDefault(): void }): void {
   if (!quitCoordinator || quitCoordinator.isQuitAllowed()) return
   event.preventDefault()
   void quitCoordinator.requestQuit()
+}
+
+// R121M5：旧任务（1.0 之前的界面）是否有真实任务在跑——自动更新"重启安装"前要看
+function legacyActive(): boolean {
+  try { return !!manager?.getActiveRealTaskId() } catch { return false }
 }

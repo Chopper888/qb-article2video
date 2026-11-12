@@ -160,6 +160,17 @@ def note_charge(amount, currency="USD"):
     box["charge_currency"] = currency
 
 
+def note_quantity(quantity):
+    """R121M2：真实调用拿到服务报的计费量后调用（豆包流式配音的 `usage.text_words`）。
+
+    perform 见到它就用它代替发请求前给的 `quantity` 记账、算金额、写进缓存记录；没报就照旧。
+    """
+    box = getattr(_usage, "box", None)
+    if box is None or quantity is None:
+        return
+    box["quantity"] = float(quantity)
+
+
 def _begin_usage():
     _usage.box = {}
 
@@ -293,6 +304,8 @@ def perform(ctx, *, step, service, cache_dir, key, describe,
             raise
         finally:
             usage = _end_usage()
+        if usage and usage.get("quantity") is not None:
+            quantity = usage["quantity"]          # R121M2：服务报的计费量（配音 usage.text_words）
         stored = result if not isinstance(result, tuple) else result[0]
         cny, usage_est = pricing.actual_cny(service, quantity, usage, prompt_chars,
                                             stored if isinstance(stored, str) else None, images)

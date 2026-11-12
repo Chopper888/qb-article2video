@@ -10,6 +10,7 @@ export const COLOR_SUB_BG = "rgba(255,255,255,0.94)"; // 字幕背景
 export const COLOR_SUB_BORDER = "#D0D0D0"; // 字幕边框
 export const COLOR_SUB_SHADOW = "transparent"; // 字幕无投影
 export const COLOR_TRACK = "#E5E5E5";      // 进度条轨道灰
+export const COLOR_BAR_BACKDROP = "rgba(245,245,247,0.86)"; // 全屏插画上进度条的半透明浅底
 export const COLOR_RING = "#CCCCCC";       // 进度条节点未来环灰
 export const COLOR_NODE_IDLE = "#FFFFFF";  // 进度条节点未完成白底
 export const COLOR_TAG_BG = "#EAF1FD";     // 章节标签底（强调色浅色版）

@@ -20,7 +20,7 @@ export interface RunView {
   currentStep: string | null
   spentCny: number
   retry: { attempt: number; waitSec: number; service: string } | null
-  failure: { step: string | null; errorKind: string; message: string; service: string | null } | null
+  failure: { step: string | null; errorKind: string; message: string; service: string | null; providerMessage?: string | null } | null
   runDone: RunDoneEvent | null
   report: CheckReport | null
   // 第一条 / 最近一条事件的时间（引擎给的 time），用来算"已用时"
@@ -84,9 +84,9 @@ function reduceEvent(view: RunView, event: EngineEvent): RunView {
       return { ...updateStep(typed, event.step, { state: 'done' }), spentCny: Math.round((view.spentCny + money(event.estimated_cny)) * 100) / 100, retry: null }
     }
     case 'step_fail':
-      return { ...updateStep(view, event.step, { state: 'failed' }), failure: { step: event.step, errorKind: event.error_kind, message: event.message, service: event.service ?? null }, retry: null }
+      return { ...updateStep(view, event.step, { state: 'failed' }), failure: { step: event.step, errorKind: event.error_kind, message: event.message, service: event.service ?? null, providerMessage: event.provider_message ?? null }, retry: null }
     case 'run_done': {
-      const failure = event.error_kind && !view.failure ? { step: view.currentStep, errorKind: event.error_kind, message: event.message, service: event.service ?? null } : view.failure
+      const failure = event.error_kind && !view.failure ? { step: view.currentStep, errorKind: event.error_kind, message: event.message, service: event.service ?? null, providerMessage: event.provider_message ?? null } : view.failure
       // 被停止时正在跑的那一步标成"已停"
       const stopped = event.error_kind === 'interrupted' && view.currentStep
         ? updateStep(view, view.currentStep, { state: 'failed' }) : view

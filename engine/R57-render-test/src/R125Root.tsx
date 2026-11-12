@@ -27,6 +27,7 @@ import {
   COLOR_TAG_FG,
   COLOR_TAG_MUTED,
   COLOR_BLACK,
+  COLOR_BAR_BACKDROP,
 } from "./colors";
 
 const FPS = videoData.fps;
@@ -45,14 +46,14 @@ type CapChar = { c: string; f: number };
 export type CapLine = (typeof videoData.subtitle_lines)[number];
 export type Chunk = { start_frame: number; end_frame: number; text: string };
 
-// ===== 字幕分句：过长的整句按标点切成更短的卡片，整条显示，不做逐字动画 =====
+// ===== R125：字幕分句（把过长的整句按标点切成更短的卡片，仍整条显示、不做逐字动画）=====
 // 注意：chars 里的 c 不一定是单字，可能是多字 token（如"展开："、"站？"），
 // 所以标点判定取 token 的末字符，宽度按 token 逐字累计，避免漏切与错算。
 const PUNCT_END = "，、；;：:。！？…—–―";
 function endsWithPunct(tok: string): boolean {
   return PUNCT_END.includes(tok[tok.length - 1]);
 }
-// 语义切分：遇到句末标点（句号、分号、问号）强制断开，序数词前也强制断开
+// R146 C3: 语义切分 —— 句末标点(句号/分号/问号)强制断开；序数词前强制断开
 const SENTENCE_END = "。；;？?！!";
 const ORDINAL_WORDS = [
   "第一", "第二", "第三", "第四", "第五", "第六", "第七", "第八", "第九", "第十",
@@ -154,9 +155,28 @@ function truncateLabel(name: string, maxPx: number): string {
   return s.length ? s + ell : name.slice(0, 1) + ell;
 }
 
+// R121M §2：MOSS 出图方式下引擎给插画场景写 fullBleed: true —— 插画铺满 1920×1080（等比放大裁切 cover，
+// 不留边、不拉伸），字幕与进度条压在图上。没有这个字段的场景（GPT 方式全部场景、截图、原图、要素卡片）
+// 走下面原来的框内画法，一个像素都不变。
+const FULL_BLEED_RANGES: [number, number][] = videoData.scenes
+  .filter((s: any) => s.fullBleed === true)
+  .map((s: any) => [s.start_frame, s.end_frame]);
+const isFullBleedFrame = (f: number) => FULL_BLEED_RANGES.some(([a, b]) => a <= f && f < b);
+
 // 单场景：硬切换（ST3-P3b 第1项取消所有转场，不再淡入/缩放）
-const Scene: React.FC<{ image: string; eff_role: string; fadeIn?: boolean; reserve?: number; leftOffset?: number; isOriginal?: boolean; noFade?: boolean }> = ({ image, eff_role, fadeIn, reserve, leftOffset = 0, isOriginal, noFade }) => {
+const Scene: React.FC<{ image: string; eff_role: string; fadeIn?: boolean; reserve?: number; leftOffset?: number; isOriginal?: boolean; noFade?: boolean; fullBleed?: boolean }> = ({ image, eff_role, fadeIn, reserve, leftOffset = 0, isOriginal, noFade, fullBleed }) => {
   const isTitle = eff_role === "title";
+  if (fullBleed) {
+    // R121M：全屏插画（底色只在图片加载前可见；cover 后整屏都是图）
+    return (
+      <AbsoluteFill style={{ background: COLOR_BG, zIndex: 10 }}>
+        <Img
+          src={staticFile(image)}
+          style={{ width: 1920, height: 1080, objectFit: "cover", objectPosition: "center" }}
+        />
+      </AbsoluteFill>
+    );
+  }
   return (
     <AbsoluteFill style={{ background: isTitle ? COLOR_BG : "transparent", zIndex: 10 }}>
       {/* R125：插画整体上移——只画在 0..(1080-RESERVE) 区域，contain 适配不裁切主体 */}
@@ -214,6 +234,7 @@ export const Subtitle: React.FC<{ bottom?: number; chunks?: Chunk[] }> = ({ bott
           background: COLOR_SUB_BG,
           borderRadius: 16,
           border: `2px solid ${COLOR_SUB_BORDER}`,
+          // R111：黄色偏移贴纸投影（实色色块，非模糊阴影），色值 #F5D949 为估算、非精确取色
           boxShadow: `6px 6px 0 0 ${COLOR_SUB_SHADOW}`,
           padding: "14px 40px",
           fontSize: FONT_SIZE,
@@ -320,7 +341,17 @@ const ProgressBar: React.FC<{ variant?: "bottom" | "A" | "B" }> = ({ variant = "
     }
   }
   const labels = chapters.map((c: any, i: number) => truncateLabel(c.name, labelW[i]));
+  // R121M §2.3：全屏插画（深色底如 S3）上进度条看不清 → 只在全屏插画的帧给进度条垫一块半透明浅底。
+  // 非全屏帧（GPT 方式全部帧）不渲染这块底，画面不变。
+  const backdrop = isFullBleedFrame(frame) ? (
+    <div style={{
+      position: "absolute", left: left - 28, right: right - 28, bottom: bottomOffset - 10, height: 80,
+      background: COLOR_BAR_BACKDROP, borderRadius: 16, zIndex: 24,
+    }} />
+  ) : null;
   return (
+    <>
+    {backdrop}
     <div style={{ position: "absolute", left, right, bottom: bottomOffset, zIndex: 25, height: 60 }}>
       <div style={{ position: "relative", height: 4, background: COLOR_TRACK, borderRadius: 2, top: 13 }}>
         <div style={{ position: "absolute", left: 0, top: 0, height: 4, width: `${progress * 100}%`, background: COLOR_ACCENT, borderRadius: 2 }} />
@@ -355,6 +386,7 @@ const ProgressBar: React.FC<{ variant?: "bottom" | "A" | "B" }> = ({ variant = "
         );
       })}
     </div>
+    </>
   );
 };
 
@@ -416,7 +448,7 @@ const R125Video: React.FC<{ variant?: "bottom" | "A" | "B" }> = ({ variant = "A"
             s.image === prev.image && shotIdOf(s) === shotIdOf(prev)
           : false; // 不出图组画面沿用前一张：同画面身份不淡入，避免闪烁
         const baseDur = Math.max(1, s.end_frame - s.start_frame);
-        // 不使用转场：场景按帧区间首尾相接、硬切换，不再延长 seqDur。
+        // ST3-P3b 第1项：取消所有转场，场景按 S9 帧区间首尾相接，硬切换，不再延长 seqDur。
         const seqDur = baseDur;
         return (
           <Sequence
@@ -429,7 +461,7 @@ const R125Video: React.FC<{ variant?: "bottom" | "A" | "B" }> = ({ variant = "A"
             ) : isElementScene(s) ? (
               <ElementScene scene={s} />
             ) : (
-              <Scene image={s.image} eff_role={s.eff_role} fadeIn={!isHold} reserve={reserve} leftOffset={leftOffset} isOriginal={(s as any).is_original} noFade={s.start_frame === 0} />
+              <Scene image={s.image} eff_role={s.eff_role} fadeIn={!isHold} reserve={reserve} leftOffset={leftOffset} isOriginal={(s as any).is_original} noFade={s.start_frame === 0} fullBleed={(s as any).fullBleed === true} />
             )}
           </Sequence>
         );

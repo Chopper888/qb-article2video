@@ -1,5 +1,6 @@
 import type { DemoImportScenario, DemoRunScenario, KeyCheckOutcome } from './adapter'
 import type { ExternalLinkId } from './links'
+import type { UpdateState } from './auto-update'
 import type { KeyFieldId, KeyStatusMap } from './keys'
 import type { ChapterList } from './chapters'
 import type { CheckReport, EngineEvent } from './protocol'
@@ -17,8 +18,30 @@ export interface V1Prefs {
   outputDir: string
   maxCostCny: number
   theme: ThemeName
+  // R120M P1：出图（普通设置，非密钥），通过环境变量 A2V_IMAGE_BACKEND / A2V_MOSS_STYLE /
+  // A2V_COMFYUI_URL / A2V_MOSS_FALLBACK_GPT 传给引擎。出图方式为 GPT 时后三项不起作用（界面置灰）。
+  imageBackend: ImageBackend
+  mossStyle: MossStyle
+  comfyuiUrl: string
+  mossFallbackGpt: boolean
+  // R120M2 Q2：启动时自动检查更新（默认开）；"忽略这个版本"记住的版本号（同一版本不再提醒）
+  autoCheckUpdate: boolean
+  ignoredUpdateVersion: string | null
   lastKeyCheck: KeyCheckRecord | null
 }
+
+// R120M3：新增 moss_rh（RunningHub 上的 MOSS 应用，消耗 RH 币，不需要本地显卡）
+export type ImageBackend = 'gpt' | 'moss_local' | 'moss_rh'
+export const IMAGE_BACKENDS: { id: ImageBackend; name: string }[] = [
+  { id: 'gpt', name: 'GPT（RunningHub）' }, { id: 'moss_local', name: 'MOSS 本地（ComfyUI）' }, { id: 'moss_rh', name: 'MOSS · RH 云端' }
+]
+// R121M：RH 同时出图数不再是设置项（引擎自动调节：起始 3，RunningHub 回并发 / 队列已满时降为 1）。
+// 正式版 4 种风格（S4 扁平矢量为新增）。
+export type MossStyle = 'S0' | 'S3' | 'S1' | 'S4'
+export const MOSS_STYLES: { id: MossStyle; name: string }[] = [
+  { id: 'S0', name: '手绘线稿' }, { id: 'S3', name: '科技霓虹' }, { id: 'S1', name: '日系水彩' }, { id: 'S4', name: '扁平矢量' }
+]
+export const DEFAULT_COMFYUI_URL = 'http://127.0.0.1:8188'
 
 export interface EngineInfo {
   version: string | null
@@ -99,7 +122,22 @@ export interface V1Api {
   listVideos(): Promise<VideoItem[]>
   diskUsage(): Promise<DiskUsageReal>
   cleanupPreview(): Promise<CleanupPreview>
+  // R120M P2：导出完整日志（zip，默认存桌面，已脱敏）
   exportDiagnostics(): Promise<ExportResult>
+  // R120M P2：导出诊断报告（.md，默认存桌面，已脱敏）
+  exportDiagnosticsReport(): Promise<ExportResult>
+  // R121M5：APP 内自动更新。状态由 Main 维护并推送；页面只发"检查 / 立即更新 / 重启安装 / 以后再说 / 跳过 / 重试"。
+  // manual=false 是启动时的自动检查（设置关了不请求）；手动下载链接只能选 github / quark，地址由 Main 决定
+  checkUpdate(manual: boolean): Promise<UpdateState>
+  openUpdateLink(which: 'github' | 'quark'): Promise<void>
+  getUpdateState(): Promise<UpdateState>
+  downloadUpdate(): Promise<UpdateState>
+  // 出片进行中 Main 会拒绝（ok=false, reason='busy'），不会退出
+  installUpdate(): Promise<{ ok: boolean; reason?: 'not_downloaded' | 'busy' | 'failed' }>
+  laterUpdate(): Promise<UpdateState>
+  skipUpdate(): Promise<UpdateState>
+  retryUpdate(): Promise<UpdateState>
+  onUpdateState(listener: (state: UpdateState) => void): () => void
   mediaUrl(file: string): string
   // APP3
   getRuntimePrep(): Promise<RuntimePrep>

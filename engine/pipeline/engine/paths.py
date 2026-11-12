@@ -66,3 +66,103 @@ def ensure_prototype_on_path():
     s = str(VENDOR_DIR / "s1-r4")
     if s not in sys.path:
         sys.path.insert(0, s)
+
+
+# --------------------------------------------------------------------------
+# R120M2 Q1：外部程序（node / ffmpeg / ffprobe）一律用绝对路径，不依赖 PATH。
+#
+# 1.1.0 安装版在没装 Node.js 的电脑上 S10 必败：render_mux 经 shell 调裸命令 `npx`，
+# 而 APP 1.0 界面启动引擎时只把 ffmpeg 目录放进了 PATH（运行包自带的 node 没放）。
+# 现在引擎自己定位这几个程序，顺序：
+#   1. 环境变量（APP 传进来的绝对路径）：A2V_NODE = node 可执行文件；A2V_FFMPEG_DIR = ffmpeg/ffprobe 所在目录；
+#   2. 运行包自带：<运行包>/node/node.exe、<运行包>/ffmpeg/bin/ffmpeg.exe（引擎在 <运行包>/engine，
+#      所以运行包 = 引擎根的上一级；Mac/Linux 上是 node/bin/node、ffmpeg/bin/ffmpeg）；
+#   3. 只在开发模式（源码运行、没有规则归档）下回退到 PATH 里找（shutil.which，得到的也是绝对路径），
+#      并在日志里写明用的是系统里的那一个。打包模式找不到自带版本就直接报错，不去碰 PATH。
+# --------------------------------------------------------------------------
+NODE_ENV = "A2V_NODE"
+FFMPEG_DIR_ENV = "A2V_FFMPEG_DIR"
+RULES_ARCHIVE_NAME = "_a2v_rules.bin"      # 与 _protect.ARCHIVE_NAME 相同；有它就是打包模式
+
+
+class ToolNotFound(RuntimeError):
+    """自带的外部程序找不到。"""
+
+
+def is_packaged(engine_root=None):
+    """打包模式 = 引擎根下有规则归档（开发模式源码直接跑，没有它）。"""
+    return (Path(engine_root or ENGINE_ROOT) / RULES_ARCHIVE_NAME).is_file()
+
+
+def _exe(name, platform=None):
+    return name + ".exe" if (platform or sys.platform) == "win32" else name
+
+
+def _is_exe(p):
+    import os
+    return bool(p) and Path(p).is_absolute() and Path(p).is_file() and os.access(str(p), os.X_OK)
+
+
+def find_node(engine_root=None, environ=None, platform=None):
+    """返回 (node 绝对路径, 来源说明)。来源：'A2V_NODE' / '运行包自带' / '系统 PATH（开发模式回退）'。"""
+    import os
+    import shutil
+    env = os.environ if environ is None else environ
+    root = Path(engine_root or ENGINE_ROOT)
+    v = (env.get(NODE_ENV) or "").strip()
+    if v:
+        if _is_exe(v):
+            return str(Path(v)), NODE_ENV
+        raise ToolNotFound(f"{NODE_ENV} 指向的 node 不存在或不可执行: {v}")
+    plat = platform or sys.platform
+    bundled = root.parent / "node" / ("node.exe" if plat == "win32" else "bin/node")
+    if _is_exe(bundled):
+        return str(bundled), "运行包自带"
+    if not is_packaged(root):
+        found = shutil.which("node", path=env.get("PATH"))
+        if found:
+            return os.path.abspath(found), "系统 PATH（开发模式回退）"
+    raise ToolNotFound(f"找不到运行包自带的 node（应在 {bundled}）")
+
+
+def find_ffmpeg_tool(name, engine_root=None, environ=None, platform=None):
+    """name 为 'ffmpeg' 或 'ffprobe'。返回 (绝对路径, 来源说明)。"""
+    import os
+    import shutil
+    env = os.environ if environ is None else environ
+    root = Path(engine_root or ENGINE_ROOT)
+    plat = platform or sys.platform
+    exe = _exe(name, plat)
+    d = (env.get(FFMPEG_DIR_ENV) or "").strip()
+    if d:
+        p = Path(d) / exe
+        if _is_exe(p):
+            return str(p), FFMPEG_DIR_ENV
+        raise ToolNotFound(f"{FFMPEG_DIR_ENV} 目录里没有 {exe}: {d}")
+    bundled = root.parent / "ffmpeg" / "bin" / exe
+    if _is_exe(bundled):
+        return str(bundled), "运行包自带"
+    if not is_packaged(root):
+        found = shutil.which(name, path=env.get("PATH"))
+        if found:
+            return os.path.abspath(found), "系统 PATH（开发模式回退）"
+    raise ToolNotFound(f"找不到运行包自带的 {exe}（应在 {bundled}）")
+
+
+def ffmpeg_exe(name="ffmpeg"):
+    """只要路径（给 ffmpeg / ffprobe 的各个调用点用）。"""
+    return find_ffmpeg_tool(name)[0]
+
+
+def remotion_cli_js(render_project):
+    """渲染工程里 Remotion CLI 的 JS 入口（@remotion/cli 的 bin.remotion，即 remotion-cli.js）。"""
+    import json
+    pkg_dir = Path(render_project) / "node_modules" / "@remotion" / "cli"
+    try:
+        rel = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8")).get("bin", {}).get("remotion")
+    except (OSError, ValueError):
+        rel = None
+    js = pkg_dir / (rel or "remotion-cli.js")
+    if not js.is_file():
+        raise ToolNotFound(f"运行环境里没有 Remotion 命令行入口: {js}")
+    return str(js)

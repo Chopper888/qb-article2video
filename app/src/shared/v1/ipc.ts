@@ -29,6 +29,18 @@ export const IPC_V1 = {
   diskUsage: 'v1:disk-usage',
   cleanupPreview: 'v1:cleanup-preview',
   exportDiagnostics: 'v1:export-diagnostics',
+  // R120M P2：诊断报告（.md）
+  exportDiagnosticsReport: 'v1:export-diagnostics-report',
+  // R121M5：APP 内自动更新（原来的"版本提醒"并进来了）
+  checkUpdate: 'v1:check-update',
+  openUpdateLink: 'v1:open-update-link',
+  getUpdateState: 'v1:get-update-state',
+  downloadUpdate: 'v1:download-update',
+  installUpdate: 'v1:install-update',
+  laterUpdate: 'v1:later-update',
+  skipUpdate: 'v1:skip-update',
+  retryUpdate: 'v1:retry-update',
+  updateState: 'v1:update-state',
   // APP3
   getRuntimePrep: 'v1:get-runtime-prep',
   retryRuntimePrep: 'v1:retry-runtime-prep',

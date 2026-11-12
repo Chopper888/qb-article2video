@@ -1,0 +1,813 @@
+{
+ "last_node_id": 62,
+ "last_link_id": 18,
+ "nodes": [
+  {
+   "id": 26,
+   "type": "PrimitiveStringMultiline",
+   "pos": [
+    40,
+    60
+   ],
+   "size": [
+    400,
+    300
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "string",
+     "type": "STRING",
+     "links": [
+      3
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveStringMultiline",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "{\"summary\": {\"meta\": [\"illustration\"], \"canvas\": \"single\", \"caption\": \"hand-drawn editorial illustration, black ink line art with a slight natural wobble, flat light grey-white background, colour only in small accents, generous white space, one person comparing two software icons side by side\"}, \"items\": [{\"label\": \"text\", \"caption\": \"Large black hand-lettered main label, the biggest text on the canvas.\", \"text\": \"Codex与Claude Code的区别\", \"bbox\": [-340, -327, -190, 327]}, {\"label\": \"object\", \"caption\": \"hand-drawn editorial illustration, one person comparing two software icons side by side\", \"bbox\": [-46, -300, 199, 299]}], \"bbox_coord_space\": \"abs_centralized\", \"bbox_format\": \"yxyx\"}"
+   ]
+  },
+  {
+   "id": 50,
+   "type": "PrimitiveInt",
+   "pos": [
+    480,
+    60
+   ],
+   "size": [
+    220,
+    60
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "int",
+     "type": "INT",
+     "links": [
+      5
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveInt",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    1360
+   ]
+  },
+  {
+   "id": 51,
+   "type": "PrimitiveInt",
+   "pos": [
+    480,
+    140
+   ],
+   "size": [
+    220,
+    60
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "int",
+     "type": "INT",
+     "links": [
+      6
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveInt",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    768
+   ]
+  },
+  {
+   "id": 52,
+   "type": "PrimitiveInt",
+   "pos": [
+    480,
+    220
+   ],
+   "size": [
+    220,
+    60
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "int",
+     "type": "INT",
+     "links": [
+      11
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "PrimitiveInt",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    123456789
+   ]
+  },
+  {
+   "id": 29,
+   "type": "UNETLoader",
+   "pos": [
+    40,
+    400
+   ],
+   "size": [
+    380,
+    100
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "links": [
+      1
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "Moss\\moss_image_sft_int8_convrot.safetensors",
+    "default"
+   ]
+  },
+  {
+   "id": 31,
+   "type": "CLIPLoader",
+   "pos": [
+    40,
+    540
+   ],
+   "size": [
+    380,
+    110
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "links": [
+      2,
+      4
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "qwen3.5_9b_int8_convrot.safetensors",
+    "moss_image",
+    "default"
+   ]
+  },
+  {
+   "id": 33,
+   "type": "VAELoader",
+   "pos": [
+    40,
+    690
+   ],
+   "size": [
+    380,
+    60
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "vae",
+     "type": "VAE",
+     "links": [
+      13
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "FLUX\\flux2-vae.safetensors"
+   ]
+  },
+  {
+   "id": 39,
+   "type": "SkipLayerGuidanceDiTSimple",
+   "pos": [
+    470,
+    330
+   ],
+   "size": [
+    320,
+    150
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SkipLayerGuidanceDiTSimple",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "",
+    "22",
+    0,
+    0.5
+   ]
+  },
+  {
+   "id": 30,
+   "type": "CLIPTextEncode",
+   "pos": [
+    470,
+    520
+   ],
+   "size": [
+    380,
+    160
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    },
+    {
+     "name": "text",
+     "type": "STRING",
+     "link": 3
+    }
+   ],
+   "outputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "links": [
+      8
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    ""
+   ]
+  },
+  {
+   "id": 37,
+   "type": "CLIPTextEncode",
+   "pos": [
+    470,
+    720
+   ],
+   "size": [
+    380,
+    130
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 4
+    }
+   ],
+   "outputs": [
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "links": [
+      9
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "nsfw, worst quality, bad anatomy, watermark, jpeg artifact"
+   ]
+  },
+  {
+   "id": 36,
+   "type": "EmptyFlux2LatentImage",
+   "pos": [
+    900,
+    330
+   ],
+   "size": [
+    320,
+    130
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "width",
+     "type": "INT",
+     "link": 5
+    },
+    {
+     "name": "height",
+     "type": "INT",
+     "link": 6
+    }
+   ],
+   "outputs": [
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": [
+      10
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "EmptyFlux2LatentImage",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    1360,
+    768,
+    1
+   ]
+  },
+  {
+   "id": 32,
+   "type": "KSampler",
+   "pos": [
+    900,
+    500
+   ],
+   "size": [
+    320,
+    260
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 7
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 8
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 9
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 10
+    },
+    {
+     "name": "seed",
+     "type": "INT",
+     "link": 11
+    }
+   ],
+   "outputs": [
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": [
+      12
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "KSampler",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    123456789,
+    "fixed",
+    50,
+    3.0,
+    "euler",
+    "sgm_uniform",
+    1
+   ]
+  },
+  {
+   "id": 38,
+   "type": "VAEDecode",
+   "pos": [
+    1270,
+    330
+   ],
+   "size": [
+    220,
+    60
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 12
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 13
+    }
+   ],
+   "outputs": [
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "links": [
+      16
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecode",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 9,
+   "type": "SaveImage",
+   "pos": [
+    1900,
+    440
+   ],
+   "size": [
+    420,
+    460
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 17
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "SaveImage",
+    "workflow_version": "moss-pure-v1"
+   },
+   "widgets_values": [
+    "MOSS/moss-pure-v1"
+   ]
+  },
+  {
+   "id": 60,
+   "type": "UpscaleModelLoader",
+   "pos": [
+    1270,
+    600
+   ],
+   "size": [
+    340,
+    60
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "UPSCALE_MODEL",
+     "type": "UPSCALE_MODEL",
+     "links": [
+      15
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UpscaleModelLoader"
+   },
+   "widgets_values": [
+    "4x-UltraSharp.pth"
+   ]
+  },
+  {
+   "id": 61,
+   "type": "ImageUpscaleWithModel",
+   "pos": [
+    1650,
+    330
+   ],
+   "size": [
+    300,
+    60
+   ],
+   "flags": {},
+   "order": 15,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "upscale_model",
+     "type": "UPSCALE_MODEL",
+     "link": 15
+    },
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "link": 16
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      18
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ImageUpscaleWithModel"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 62,
+   "type": "ImageScale",
+   "pos": [
+    1650,
+    470
+   ],
+   "size": [
+    340,
+    130
+   ],
+   "flags": {},
+   "order": 16,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "image",
+     "type": "IMAGE",
+     "link": 18
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      17
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ImageScale"
+   },
+   "widgets_values": [
+    "lanczos",
+    1920,
+    1080,
+    "disabled"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   29,
+   0,
+   39,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   31,
+   0,
+   30,
+   0,
+   "CLIP"
+  ],
+  [
+   3,
+   26,
+   0,
+   30,
+   1,
+   "STRING"
+  ],
+  [
+   4,
+   31,
+   0,
+   37,
+   0,
+   "CLIP"
+  ],
+  [
+   5,
+   50,
+   0,
+   36,
+   0,
+   "INT"
+  ],
+  [
+   6,
+   51,
+   0,
+   36,
+   1,
+   "INT"
+  ],
+  [
+   7,
+   39,
+   0,
+   32,
+   0,
+   "MODEL"
+  ],
+  [
+   8,
+   30,
+   0,
+   32,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   9,
+   37,
+   0,
+   32,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   10,
+   36,
+   0,
+   32,
+   3,
+   "LATENT"
+  ],
+  [
+   11,
+   52,
+   0,
+   32,
+   4,
+   "INT"
+  ],
+  [
+   12,
+   32,
+   0,
+   38,
+   0,
+   "LATENT"
+  ],
+  [
+   13,
+   33,
+   0,
+   38,
+   1,
+   "VAE"
+  ],
+  [
+   15,
+   60,
+   0,
+   61,
+   0,
+   "UPSCALE_MODEL"
+  ],
+  [
+   16,
+   38,
+   0,
+   61,
+   1,
+   "IMAGE"
+  ],
+  [
+   17,
+   62,
+   0,
+   9,
+   0,
+   "IMAGE"
+  ],
+  [
+   18,
+   61,
+   0,
+   62,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {
+  "workflow_version": "moss-pure-v1"
+ },
+ "extra": {
+  "ds": {
+   "scale": 0.75,
+   "offset": [
+    0,
+    0
+   ]
+  },
+  "workflow_version": "moss-pure-v1"
+ },
+ "version": 0.4
+}

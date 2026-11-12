@@ -20,7 +20,9 @@
 - GitHub Releases：<https://github.com/Chopper888/qb-article2video/releases>
 - 夸克网盘下载（国内推荐）：<https://pan.quark.cn/s/03ebea3c47ef>
 
-最新版本：1.1.0。安装包使用作者完整风格，出片效果与上方演示一致。
+最新版本：1.2.1。安装包使用作者完整风格，出片效果与上方演示一致。
+
+1.2.1 起可在 APP 内更新；1.1.0 / 1.2.0 用户需要手动安装一次 1.2.1，之后即可在 APP 内更新。
 
 ### 方式二：从源码运行
 
@@ -45,6 +47,30 @@
 - 首次运行时 Windows SmartScreen 可能提示「Windows 已保护你的电脑」：
   点「更多信息」→「仍要运行」即可。
 - 在「设置」里填入各服务的 API Key 后即可导入文章、开始生成。
+
+## MOSS 出图（可选）
+
+默认用 GPT 出图（RunningHub 上的 AI 应用：按张付费，不需要显卡，风格稳定）。不想为插画付费时，可以改用 MOSS。
+
+| 方式 | 怎么出图 | 花费 | 需要什么 |
+|---|---|---|---|
+| GPT（默认） | RunningHub 上的 GPT 图像应用 | 人民币，按张计费 | RunningHub 密钥 |
+| MOSS 本地 | 自己电脑上的 ComfyUI | 零花费 | 较好的显卡（建议 24 GB 显存）和 ComfyUI |
+| MOSS · RH 云端 | RunningHub 上的 MOSS 应用（[应用页](https://www.runninghub.ai/zh-cn/ai-detail/2119998359464431617)，编号 `2119998359464431617`） | RH 币（每张约 70 币） | RunningHub 密钥 |
+
+四种风格：`S0` 手绘线稿（默认）、`S3` 科技霓虹、`S1` 日系水彩、`S4` 扁平矢量。安装版在「设置 → 出图」里选；从源码运行时设置环境变量 `A2V_IMAGE_BACKEND`（`gpt` / `moss_local` / `moss_rh`）和 `A2V_MOSS_STYLE`。
+
+MOSS 本地需要在 ComfyUI 里准备这些模型文件（引擎出图前会检查，缺文件会提示具体缺哪个）：
+
+| 用途 | 文件 | 放到 ComfyUI 的 | 来源 |
+|---|---|---|---|
+| 主模型（节点 29） | `Moss/moss_image_sft_int8_convrot.safetensors` | `models/diffusion_models/` | <https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT> |
+| 文本编码器（节点 31） | `qwen3.5_9b_int8_convrot.safetensors` | `models/text_encoders/` | <https://huggingface.co/Qwen/Qwen3.5-9B> |
+| VAE（节点 33） | `FLUX/flux2-vae.safetensors` | `models/vae/` | <https://huggingface.co/black-forest-labs/FLUX.2-dev> |
+| 放大模型（节点 60） | `4x-UltraSharp.pth` | `models/upscale_models/` | 在 ComfyUI 管理器里搜索 `4x-UltraSharp` 安装 |
+
+工作流文件：[API 格式](workflows/MOSS-纯出图版-v2-API格式.json) ｜ [可视化格式](workflows/MOSS-纯出图版-v2-可视化.json)。
+两个文件是同一个工作流的两种格式；对外输入只有两个节点：**节点 26 = Layout JSON**（版式，字符串）、**节点 52 = 随机种子**（整数，按字符串形式传）。
 
 ## 从源码运行
 

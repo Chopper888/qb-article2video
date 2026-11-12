@@ -1,6 +1,7 @@
 import { Clapperboard, Clock, Home, List, Moon, RotateCw, Settings, Sun } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
-import type { ErrorGuide, GuideAction } from '../../shared/v1/error-kinds'
+import type { ErrorGuide, GuideAction, GuideButton } from '../../shared/v1/error-kinds'
+import type { ExternalLinkId } from '../../shared/v1/links'
 import type { CheckReport } from '../../shared/v1/protocol'
 import type { StepView } from '../../shared/v1/run-model'
 import type { RuntimePrep } from '../../shared/v1/types'
@@ -93,8 +94,10 @@ export function EngineDetail({ message }: { message: string }): React.JSX.Elemen
 }
 
 // blocked：暂时不能点的动作（APP3：运行环境准备好之前"继续"类的按钮不能点）
-export function GuideBanner({ guide, engineMessage, onAction, blocked = [] }: { guide: ErrorGuide; engineMessage?: string | null; onAction: (action: GuideAction, value?: number) => void; blocked?: GuideAction[] }): React.JSX.Element {
+export function GuideBanner({ guide, engineMessage, onAction, blocked = [] }: { guide: ErrorGuide; engineMessage?: string | null; onAction: (action: GuideAction, value?: number, link?: ExternalLinkId) => void; blocked?: GuideAction[] }): React.JSX.Element {
   const [limit, setLimit] = useState(guide.limitInput?.defaultValue ?? 0)
+  // R120M：带链接的按钮（open_link）才多传链接 id；其他按钮的回调参数与以前一样
+  const fire = (button: GuideButton): void => { if (button.link) onAction(button.action, undefined, button.link); else onAction(button.action) }
   const valid = Number.isFinite(limit) && limit > 0 && limit <= 10000
   if (guide.limitInput) {
     // 到费用上限：一个金额输入框 + 一个按钮"上限改成 ¥N，继续"
@@ -104,6 +107,7 @@ export function GuideBanner({ guide, engineMessage, onAction, blocked = [] }: { 
         <div className="body">
           <div className="title">{guide.title}</div>
           <div className="text">{guide.text}</div>
+          {guide.providerMessage && <div className="provider-msg selectable">服务返回：{guide.providerMessage}</div>}
           {guide.showEngineMessage && engineMessage && <EngineDetail message={engineMessage} />}
         </div>
         <div className="actions">
@@ -119,11 +123,14 @@ export function GuideBanner({ guide, engineMessage, onAction, blocked = [] }: { 
       <div className="body">
         <div className="title">{guide.title}</div>
         <div className="text">{guide.text}</div>
+        {guide.providerMessage && <div className="provider-msg selectable">服务返回：{guide.providerMessage}</div>}
         {guide.showEngineMessage && engineMessage && <EngineDetail message={engineMessage} />}
       </div>
       <div className="actions">
-        <button className="btn btn-primary" disabled={blocked.includes(guide.primary.action)} onClick={() => onAction(guide.primary.action)}>{guide.primary.label}</button>
-        {guide.secondary && <button className="btn" disabled={blocked.includes(guide.secondary.action)} onClick={() => onAction(guide.secondary!.action)}>{guide.secondary.label}</button>}
+        <button className="btn btn-primary" disabled={blocked.includes(guide.primary.action)} onClick={() => fire(guide.primary)}>{guide.primary.label}</button>
+        {guide.secondary && <button className="btn" disabled={blocked.includes(guide.secondary.action)} onClick={() => fire(guide.secondary!)}>{guide.secondary.label}</button>}
+        {guide.exportReport && guide.primary.action !== 'export_report' && guide.secondary?.action !== 'export_report' &&
+          <button className="btn" onClick={() => onAction('export_report')}>导出诊断报告</button>}
       </div>
     </div>
   )

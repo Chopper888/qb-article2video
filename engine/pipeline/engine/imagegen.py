@@ -33,7 +33,7 @@ import urllib.request
 from pipeline.engine import errors, netretry
 from pipeline.engine.errors import StepError
 
-# RunningHub 账号在 .ai 站（与 .cn 不互通），引擎所有请求统一走这里。
+# ST3-P29：作者的 RunningHub 账号在 .ai 站（与 .cn 不互通），引擎所有请求统一走这里。
 RUNNINGHUB_BASE = "https://www.runninghub.ai"
 RUNNINGHUB_HOST = "www.runninghub.ai"
 RH_BASE = RUNNINGHUB_BASE
@@ -43,7 +43,16 @@ RH_RESOLUTION = "1k"
 # RunningHub 提交返回的余额不足（P25W 实测：{"errorCode":"605","errorMessage":"Your balance is insufficient. ..."}）。
 RH_BALANCE_CODES = ("605",)
 
-# AI 应用的全部参数（换应用或改节点时只改这一处）。
+# R121M §6.2：RunningHub 表示"并发 / 队列已满 / 超出同时任务数"的错误（任务没建成，可以稍后重新提交）。
+# 依据：RunningHub 官方《API Error Code Reference》（www.runninghub.ai/runninghub-api-doc-en/doc-8287467，
+# 中文版同号错误码同义）：
+#   415 TASK_INSTANCE_MAXED —— 独占型 API 机器数不足，请等待 30～120 秒后重试；
+#   421 TASK_QUEUE_MAXED    —— 共享型 API 并发上限，请自行排队。
+# 只有 MOSS · RH 的提交用这条判定（GPT 出图的提交与 1.2.0 相同，不受影响）。
+RH_BUSY_CODES = ("415", "421")
+_BUSY_WORDS = ("task_queue_maxed", "task_instance_maxed")
+
+# ST3-P27：AI 应用的全部参数（以后作者换应用、改节点，只改这一处）。
 # 请求体：{"nodeInfoList": [{nodeId, fieldName, fieldValue} × 3], "instanceType", "usePersonalQueue"}。
 RH_APP = {
     "base": RUNNINGHUB_BASE,
@@ -54,6 +63,21 @@ RH_APP = {
     "field_resolution": "resolution",
     "aspect": "16:9",
     "resolution": "1k",
+    "instance_type": "default",
+    "use_personal_queue": "false",
+}
+
+# R120M3：MOSS · RH 云端用的 AI 应用（作者封装的 Hermes「MOSS-纯出图版-v1」，公开应用）。
+# 请求体：{"nodeInfoList": [{"nodeId": "26", "fieldName": "value", "fieldValue": Layout JSON 原文},
+#                          {"nodeId": "52", "fieldName": "value", "fieldValue": 种子（字符串形式的整数）}],
+#          "instanceType": "default", "usePersonalQueue": "false"}
+# 提交 / 查询 / 取图 / 余额与错误判断与 GPT 用的 AI 应用完全相同（`_app_submit`、`app_check`、`download`）。
+RH_MOSS_APP = {
+    "base": RUNNINGHUB_BASE,
+    "webapp_id": "2119998359464431617",
+    "node_layout": "26",
+    "node_seed": "52",
+    "field": "value",
     "instance_type": "default",
     "use_personal_queue": "false",
 }
@@ -80,6 +104,26 @@ def is_balance_reply(obj):
             return True
     msg = " ".join(str(obj.get(k) or "") for k in ("errorMessage", "msg", "message")).lower()
     return any(w in msg for w in _BALANCE_WORDS)
+
+
+def is_busy_reply(obj):
+    """R121M：RunningHub 的回复是不是"并发 / 队列已满"（错误码 415 / 421 或错误标识 TASK_*_MAXED）。"""
+    if isinstance(obj, (str, bytes)):
+        raw = obj.decode("utf-8", "replace") if isinstance(obj, bytes) else obj
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            return any(w in raw.lower() for w in _BUSY_WORDS)
+    if not isinstance(obj, dict):
+        return False
+    d = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+    for src in (obj, d):
+        for k in ("errorCode", "code"):
+            if str(src.get(k) or "") in RH_BUSY_CODES:
+                return True
+    msg = " ".join(str(src.get(k) or "") for src in (obj, d)
+                   for k in ("errorMessage", "msg", "message")).lower()
+    return any(w in msg for w in _BUSY_WORDS)
 
 
 def _post_once(url, payload, api_key, timeout):
@@ -192,15 +236,34 @@ def _app_payload(prompt):
     ], "instanceType": a["instance_type"], "usePersonalQueue": a["use_personal_queue"]}
 
 
+def moss_app_payload(layout, seed):
+    """R120M3：MOSS · RH 应用的请求体（种子按作者给的示例写成字符串形式的整数）。"""
+    a = RH_MOSS_APP
+    return {"nodeInfoList": [
+        {"nodeId": a["node_layout"], "fieldName": a["field"], "fieldValue": layout},
+        {"nodeId": a["node_seed"], "fieldName": a["field"], "fieldValue": str(int(seed))},
+    ], "instanceType": a["instance_type"], "usePersonalQueue": a["use_personal_queue"]}
+
+
 def app_submit(prompt, api_key, log=None):
     """提交 AI 应用出图任务，返回 taskId。
 
     提交接口直接返回完整任务对象（`taskId`、`status`=RUNNING、`errorCode`……）。`taskId` 为空时
     按官方接口同一套规则分类：余额不足 / 临时故障 / 鉴权失败（401、403）/ 其他服务错误。
     """
-    url = f"{RH_APP['base']}/openapi/v2/run/ai-app/{RH_APP['webapp_id']}"
+    return _app_submit(RH_APP, _app_payload(prompt), api_key, log=log)
+
+
+def moss_app_submit(layout, seed, api_key, log=None, busy_exc=None):
+    """R120M3：提交一张 MOSS · RH 候选图，返回 taskId（与 `app_submit` 同一套提交与错误分类）。
+    R121M：给了 `busy_exc` 时，RunningHub 回"并发 / 队列已满"抛它（调用方降并发后重新提交）。"""
+    return _app_submit(RH_MOSS_APP, moss_app_payload(layout, seed), api_key, log=log, busy_exc=busy_exc)
+
+
+def _app_submit(app, payload, api_key, log=None, busy_exc=None):
+    url = f"{app['base']}/openapi/v2/run/ai-app/{app['webapp_id']}"
     try:
-        st, raw = rh_request(url, _app_payload(prompt), api_key, submit=True, log=log)
+        st, raw = rh_request(url, payload, api_key, submit=True, log=log)
     except Exception as e:
         if netretry.is_transient_exc(e) and not netretry.is_unsent_exc(e):
             raise StepError(f"RunningHub 提交请求已发出、但没收到回复（{netretry.describe_exc(e)}）；"
@@ -217,6 +280,8 @@ def app_submit(prompt, api_key, log=None):
     except Exception:
         pass
     if not tid:
+        if busy_exc is not None and (is_busy_reply(raw) or str(st) in RH_BUSY_CODES):
+            raise busy_exc(f"HTTP {st}: {raw[:200]}")
         if is_balance_reply(raw):
             kind = errors.KIND_BALANCE
         elif st in netretry.TRANSIENT_HTTP:

@@ -16,6 +16,7 @@ import type { DevNoPaid } from './dev-no-paid'
 import { restageDroppedFiles, stageDroppedFiles } from './drop-import'
 import { DEMO_CHAPTERS } from './demo-scenarios'
 import type { PrefsStore } from './prefs-store'
+import { initialUpdateState, type UpdateState } from '../../shared/v1/auto-update'
 import type { SecretStore } from './secret-store'
 
 export interface V1Context {
@@ -32,6 +33,20 @@ export interface V1Context {
   // APP2：真实数据（任务列表、成片库、磁盘占用、诊断导出）
   data?: V1DataSources
   extras?: V1Extras
+  // R121M5：APP 内自动更新
+  updates?: UpdateService
+}
+
+export interface UpdateService {
+  get(): UpdateState
+  subscribe(listener: (state: UpdateState) => void): () => void
+  check(manual: boolean): Promise<UpdateState>
+  download(): Promise<UpdateState>
+  retry(): Promise<UpdateState>
+  later(): UpdateState
+  skip(): UpdateState
+  install(): { ok: boolean; reason?: 'not_downloaded' | 'busy' | 'failed' }
+  linkFor(which: unknown): string | null
 }
 
 export interface V1DataSources {
@@ -45,6 +60,10 @@ export interface V1DataSources {
   deleteTaskCheck?(workDir: string, article: string): DeleteTaskOutcome
   deleteTask?(workDir: string, article: string): Promise<DeleteTaskOutcome>
   exportDiagnostics(target: string): Promise<ExportResult>
+  // R120M P2：诊断报告 .md
+  exportDiagnosticsReport?(target: string): Promise<ExportResult>
+  // R120M P2：两种导出的默认保存位置（桌面）
+  desktopDir?(): string
   // APP4：一篇文章的标题和类型（完成页、"重新出片"用）
   articleInfo?(workDir: string, article: string): ArticleInfo | null
 }
@@ -244,16 +263,53 @@ export function registerV1Ipc(ctx: V1Context): void {
     const error = await shell.openPath(file)
     if (error) throw new Error(`打不开许可文件：${error}`)
   })
+  // R120M P2：两种导出默认都存桌面（以前 zip 的默认位置只给了文件名，对话框落在系统上次用的文件夹）
+  const stampOf = (d: Date): string => {
+    const p = (n: number): string => String(n).padStart(2, '0')
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  }
+  const defaultPath = (name: string): string => ctx.data?.desktopDir ? join(ctx.data.desktopDir(), name) : name
   ipcMain.handle(IPC_V1.exportDiagnostics, async (event): Promise<ExportResult> => {
     const window = trusted(event)
     if (!ctx.data) return { ok: false, error: '这个版本不支持导出' }
     // 开发截图用：开发模式下 A2V_DEV_DIAG_TARGET 指定保存位置时不弹对话框
     const devTarget = ctx.appInfo().devTools && !ctx.appInfo().isPackaged ? process.env.A2V_DEV_DIAG_TARGET : undefined
     if (devTarget && isAbsolute(devTarget)) return ctx.data.exportDiagnostics(devTarget)
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
-    const result = await dialog.showSaveDialog(window, { title: '导出诊断信息', defaultPath: `文章成片-诊断-${stamp}.zip`, filters: [{ name: 'zip', extensions: ['zip'] }] })
+    const result = await dialog.showSaveDialog(window, { title: '导出完整日志', defaultPath: defaultPath(`文章成片-完整日志-${stampOf(new Date())}.zip`), filters: [{ name: 'zip', extensions: ['zip'] }] })
     if (result.canceled || !result.filePath) return { ok: false, canceled: true }
     return ctx.data.exportDiagnostics(result.filePath)
+  })
+  ipcMain.handle(IPC_V1.exportDiagnosticsReport, async (event): Promise<ExportResult> => {
+    const window = trusted(event)
+    if (!ctx.data?.exportDiagnosticsReport) return { ok: false, error: '这个版本不支持导出' }
+    const devTarget = ctx.appInfo().devTools && !ctx.appInfo().isPackaged ? process.env.A2V_DEV_REPORT_TARGET : undefined
+    if (devTarget && isAbsolute(devTarget)) return ctx.data.exportDiagnosticsReport(devTarget)
+    const result = await dialog.showSaveDialog(window, { title: '导出诊断报告', defaultPath: defaultPath(`文章成片-诊断报告-${stampOf(new Date())}.md`), filters: [{ name: 'Markdown', extensions: ['md'] }] })
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true }
+    return ctx.data.exportDiagnosticsReport(result.filePath)
+  })
+  // R121M5：APP 内自动更新。状态在 Main；没有接上更新服务（旧测试替身）时一律是"不支持"
+  const noUpdates = (): UpdateState => initialUpdateState(ctx.appInfo().appVersion, 'unsupported')
+  ctx.updates?.subscribe(state => {
+    const window = ctx.window()
+    if (window && !window.isDestroyed()) window.webContents.send(IPC_V1.updateState, state)
+  })
+  ipcMain.handle(IPC_V1.getUpdateState, (event): UpdateState => { trusted(event); return ctx.updates?.get() ?? noUpdates() })
+  ipcMain.handle(IPC_V1.checkUpdate, async (event, manual: unknown): Promise<UpdateState> => {
+    trusted(event)
+    return ctx.updates ? ctx.updates.check(manual === true) : noUpdates()
+  })
+  ipcMain.handle(IPC_V1.downloadUpdate, async (event): Promise<UpdateState> => { trusted(event); return ctx.updates ? ctx.updates.download() : noUpdates() })
+  ipcMain.handle(IPC_V1.retryUpdate, async (event): Promise<UpdateState> => { trusted(event); return ctx.updates ? ctx.updates.retry() : noUpdates() })
+  ipcMain.handle(IPC_V1.laterUpdate, (event): UpdateState => { trusted(event); return ctx.updates?.later() ?? noUpdates() })
+  ipcMain.handle(IPC_V1.skipUpdate, (event): UpdateState => { trusted(event); return ctx.updates?.skip() ?? noUpdates() })
+  // "重启安装"：出片进行中由更新服务拒绝（不退出）
+  ipcMain.handle(IPC_V1.installUpdate, (event) => { trusted(event); return ctx.updates?.install() ?? { ok: false, reason: 'not_downloaded' as const } })
+  ipcMain.handle(IPC_V1.openUpdateLink, async (event, which: unknown) => {
+    trusted(event)
+    const url = ctx.updates?.linkFor(which) ?? null
+    if (!url) throw new Error('不允许打开这个地址')
+    await shell.openExternal(url)
   })
   ipcMain.handle(IPC_V1.estimate, (event, article: unknown) => {
     trusted(event)

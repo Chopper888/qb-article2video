@@ -187,6 +187,17 @@ a, .link { color: var(--accent-text); text-decoration: underline; text-underline
 .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 9px; overflow: hidden; }
 .seg button { height: 32px; padding: 0 14px; border: 0; background: transparent; font-size: 13px; color: var(--muted); }
 .seg button[aria-pressed='true'] { background: var(--panel2); color: var(--text); }
+/* R121M：出图方式 / 风格下拉框与风格示例小图 */
+.select-input { height: 34px; min-width: 190px; border: 1px solid var(--input-line); background: var(--input); border-radius: 8px; padding: 0 10px; font-size: 13.5px; color: var(--text); outline: none; }
+.select-input:focus { border-color: var(--accent); }
+.select-input:disabled { opacity: .55; }
+.style-sample { width: 128px; height: 72px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line2); flex-shrink: 0; }
+.is-disabled .style-sample { opacity: .45; }
+/* R120M：设置 → 通用 → 出图（GPT 方式时 MOSS 的三项置灰） */
+.image-group { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.image-group .group-head .t { font-weight: 600; }
+.box-row.is-disabled .t, .box-row.is-disabled .d { opacity: 0.5; }
+.box-row.is-disabled input:disabled { opacity: 0.5; }
 pre.diag { margin: 0; padding: 14px 16px; background: var(--input); border: 1px solid var(--line2); border-radius: 10px; font-size: 12px; line-height: 1.6; white-space: pre-wrap; color: var(--muted); max-height: 260px; overflow: auto; }
 
 /* 密钥行（引导和设置共用） */
@@ -303,3 +314,29 @@ button.card { color: var(--text); font: inherit; display: flex; flex-direction: 
 .key-where { font-size: 12.5px; }
 .key-how { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; white-space: normal; }
 .warn-detail { margin: 6px 0 0; padding-left: 18px; font-size: 12px; max-height: 160px; overflow: auto; }
+
+/* R120M P3：失败提示条里服务商的原话 */
+.banner .provider-msg { margin-top: 6px; font-size: 12.5px; color: var(--muted); word-break: break-all; }
+
+/* R121M5：APP 内自动更新（顶部提示条 + 小窗口 + 关于页一行） */
+.update-bar { flex: none; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 20px; background: var(--panel2); border-bottom: 1px solid var(--line2); font-size: 13px; }
+.update-bar .t { font-weight: 600; white-space: nowrap; }
+.update-bar .d { color: var(--muted); }
+.update-bar .pct { color: var(--muted); font-variant-numeric: tabular-nums; width: 38px; text-align: right; }
+.update-bar .grow { flex: 1; }
+.update-bar .update-progress { flex: 1; max-width: 420px; }
+.update-bar.ok { background: var(--panel2); }
+.update-bar.ok .t { color: var(--ok); }
+.update-bar.danger { background: var(--danger-bg); border-bottom-color: var(--danger-line); }
+.update-bar.danger .t { color: var(--danger); }
+.update-close { font-size: 18px; line-height: 1; padding: 0 4px; color: var(--muted); text-decoration: none; }
+.update-progress { height: 6px; border-radius: 3px; background: var(--line2); overflow: hidden; }
+.update-progress span { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width .2s; }
+.update-overlay { z-index: 60; }
+.update-dialog { width: 520px; border-color: var(--line2); padding: 24px 26px; }
+.update-dialog .update-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.update-dialog .update-notes-box { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; max-height: 220px; overflow: auto; font-size: 13px; }
+.update-dialog .update-notes-box .h { font-weight: 600; margin-bottom: 6px; }
+.update-dialog .update-notes { margin: 0; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; line-height: 1.6; }
+.update-dialog .update-dl { display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.update-about { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }

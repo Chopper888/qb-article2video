@@ -26,8 +26,8 @@ import wave
 from collections import Counter
 from pathlib import Path, PureWindowsPath
 
-from pipeline.engine import (errors, imagegen, intake, ledger, netretry, paid, paths, pricing,
-                             render_project, spec, stopflag, stubs)
+from pipeline.engine import (errors, imagegen, intake, ledger, moss, netretry, paid, paths, pricing,
+                             render_project, spec, stopflag, stubs, tts_stream)
 from pipeline import elements
 # StepError 定义搬到 errors.py（paid.py 也要抛它，互相 import 会成环）；
 # 这里 re-export，保持 `from pipeline.engine.steps import StepError` 的老用法可用。
@@ -160,7 +160,7 @@ _CACHE_DIR = {
 
 _DEEPSEEK_MODEL = "deepseek-v4-pro"                 # 同 shot_ai.DEEPSEEK_MODEL
 _ARK_MODEL = "doubao-seed-2-1-pro-260915"           # 同 shot_ai.ARK_MODEL
-_SPEECH_MODEL = "doubao-tts-seed-icl-2.0"           # 豆包长文本 TTS（resource id seed-icl-2.0）
+_SPEECH_MODEL = "doubao-tts-seed-icl-2.0"           # 1.2.0 整篇异步配音的缓存键前缀（R121M2 起只用来认老缓存）
 
 
 def _progress(ctx, step, done, total, unit, message=None):
@@ -420,7 +420,7 @@ def _find_command_hits(narration):
 
 
 def _build_narration_messages(template, article_text):
-    """把模板拆成 system + user，并把文章嵌入。"""
+    """把模板拆成 system + user，并把文章嵌入（与 r168_narration.py:76-100 一致）。"""
     lines = template.splitlines()
     marker = None
     for i, ln in enumerate(lines):
@@ -429,7 +429,8 @@ def _build_narration_messages(template, article_text):
             break
     if marker is None:
         system = template
-        user = ("请按以上要求，把下面这篇文章改写成自然、完整的视频口播稿。\n\n【原始文章】\n\n" + article_text)
+        user = ("请按照以上规则，把下面这篇文章转换成自然、完整的视频口播稿。第一部分\"红线规则\"必须严格遵守，"
+                "第二部分\"格式与风格\"在此基础上执行。\n\n【原始文章】\n\n" + article_text)
     else:
         system = "\n".join(lines[:marker])
         user = "\n".join(lines[marker:])
@@ -519,9 +520,9 @@ def command_closing(sentence):
 
 def _rewrite_command_prompt(sentence):
     return (
-        "下面这句口播提到了命令、网址或文件路径，请改写：\n"
+        "下面这句话在视频口播里点名了命令、网址或文件路径，请改写：\n"
         f"原句：{sentence}\n"
-        "要求：不要念出命令名、参数、包名、网址或文件路径；讲清这一步的作用，"
+        "要求：不念出命令名、参数、包名、网址、文件路径；说清这一步要做什么，"
         f"然后统一说“{command_closing(sentence)}”。原句写明了命令从哪里来时，"
         "后面再加一句“这条命令可以从 xx 官网复制”，xx 照原句的写法。\n"
         "只输出改写后的句子，不要任何其他文字。"
@@ -624,8 +625,8 @@ def compose_narration(ctx):
     alt_keys = [paid.cache_key(_DEEPSEEK_MODEL, text,
                                dict(params, template_sha256=hashlib.sha256(v).hexdigest()))
                 for v in tpl_variants[1:]]
-    # 相邻重复句只在新生成时删除（在付费回调里做，缓存保存的已经是删过的稿）。
-    # 老文章的旧缓存直接沿用：重跑 S1 时口播不变，配音缓存仍然命中。
+    # R101 E：相邻重复句只在**新生成**时删（在付费回调里做，缓存里存的就是删过的稿）。
+    # 1.0.0 留下的缓存原样回放：清理过中间文件的老文章重跑 S1 时口播逐字不变，配音缓存照样命中。
     dedup = {"ran": False, "removed": []}
 
     def _fresh(gen):
@@ -641,7 +642,7 @@ def compose_narration(ctx):
         invoke_stub=lambda: _fresh(lambda: _pseudo_narration(text)))
     out_text = (out_text or "").strip()
 
-    # 口播命令点名检查：按句命中时只重写这一句（最多 2 次），仍命中则标红。
+    # ST3-F1 第6项：口播命令点名检查——按句命中就只重写这一句（最多 2 次），仍命中标红。
     rewrite_log = []
     for attempt in range(2):
         hits = _find_command_hits(out_text)
@@ -699,7 +700,7 @@ def step_s1(ctx):
 
 
 # --------------------------------------------------------------------------
-# S3 配音（付费点；豆包异步：先落 pending_jobs 再查）
+# S3 配音（付费点；R121M2 起豆包单向流式，按段合成、按段缓存）
 # --------------------------------------------------------------------------
 
 
@@ -773,34 +774,14 @@ def _tts_text(narration):
     return text
 
 
-def _stub_tts_submit(text, cache_dir):
-    """桩：提交"任务"。返回稳定 task_id，并把提交内容落到 `<cache>/tts_jobs/<id>.json`，
-    让**重跑的新进程**也能按任务号查到结果（模拟真实豆包的异步任务）。"""
-    tid = "stub-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    d = Path(cache_dir) / "tts_jobs"
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{tid}.json").write_text(json.dumps({"text": text}, ensure_ascii=False),
-                                   encoding="utf-8")
-    log = d / "_submissions.log"
-    with open(log, "a", encoding="utf-8") as f:
-        f.write(tid + "\n")
-    return tid
-
-
-def _stub_tts_query(task_id, cache_dir):
-    d = Path(cache_dir) / "tts_jobs"
-    p = d / f"{task_id}.json"
-    if not p.is_file():
-        raise StepError(f"桩：查不到任务号 {task_id}（未提交过）")
-    payload = json.loads(p.read_text(encoding="utf-8"))
-    return stubs.stub_tts(payload["text"])
-
-
-# 豆包长文本 TTS（submit/query 请求结构）
-_TTS_BASE = "https://openspeech.bytedance.com/api/v3/tts"
-# 音色：环境变量 A2V_TTS_SPEAKER（留空用默认公共音色）；资源编号按音色自动选择：
-# 复刻音色（S_ 开头）→ seed-icl-2.0；公共音色按代际 → _uranus_bigtts=seed-tts-2.0、_mars_bigtts=seed-tts-1.0。
-# 环境变量 A2V_TTS_RESOURCE_ID 非空时手动覆盖。
+# R121M2：配音改走豆包「单向流式语音合成（HTTP）」，请求 / 解析 / 认错误在 tts_stream.py。
+# 不再用异步长文本（submit + query 轮询 + 20 分钟超时）：火山客服确认它本来就是排队处理、承诺 6 小时内返回，
+# 不是实时接口；复刻音色在它上面长时间 task_status=1（R121W0 回执 §5.1）。旧代码路径已删除。
+# R110W A1：X-Api-Resource-Id 按音色选，不再写死。
+#   - 复刻音色（S_ 开头）→ 声音复刻 2.0：seed-icl-2.0（与 1.0.1 完全相同）
+#   - 公共音色 → 对应代际的语音合成大模型：_uranus_bigtts=2.0、_mars_bigtts=1.0
+# 依据：火山引擎《音色列表》https://www.volcengine.com/docs/6561/1257544
+# 与《单向流式语音合成（HTTP）》https://docs.volcengine.com/docs/doubao-voice/unidirectional-streaming-text-to-speech-http（请求头 X-Api-Resource-Id）
 _TTS_RESOURCE_CLONE = "seed-icl-2.0"
 _TTS_RESOURCE_DEFAULT_PUBLIC = "seed-tts-2.0"
 _PUBLIC_SPEAKER_RESOURCES = (
@@ -808,18 +789,27 @@ _PUBLIC_SPEAKER_RESOURCES = (
     ("_mars_bigtts", "seed-tts-1.0"),
 )
 _TTS_RESOURCE_ENV = "A2V_TTS_RESOURCE_ID"
+# R110W A1：默认公共音色——豆包语音合成大模型 2.0「爽快思思」（通用场景，普通话女声，
+# 公共预置音色、无需声音复刻）。与 seed-tts-2.0 成对使用。
 _DEFAULT_PUBLIC_SPEAKER = "zh_female_shuangkuaisisi_uranus_bigtts"
 _TTS_SPEAKER_ENV = "A2V_TTS_SPEAKER"
 _TTS_SPEECH_RATE = 25          # 1.25×（narration_prep.SPEECH_RATE_1_25X）
 
 
 def tts_speaker():
-    """配音音色：环境变量 A2V_TTS_SPEAKER，留空用默认公共音色。"""
+    """配音音色：环境变量 A2V_TTS_SPEAKER，留空用默认公共音色。
+
+    语速（25）、采样率（24000）不随音色变；缓存键含音色，换音色会重新合成。
+    """
     return (os.environ.get(_TTS_SPEAKER_ENV) or "").strip() or _DEFAULT_PUBLIC_SPEAKER
 
 
 def tts_resource_id(speaker=None):
-    """按音色选 X-Api-Resource-Id；A2V_TTS_RESOURCE_ID 非空时手动覆盖。"""
+    """按音色选 `X-Api-Resource-Id`；`A2V_TTS_RESOURCE_ID` 非空时手动覆盖。
+
+    复刻音色（`S_` 开头）→ `seed-icl-2.0`；公共音色 → 该音色代际对应的语音合成大模型资源
+    （`_uranus_bigtts` → `seed-tts-2.0`，`_mars_bigtts` → `seed-tts-1.0`，其余按 2.0）。
+    """
     override = (os.environ.get(_TTS_RESOURCE_ENV) or "").strip()
     if override:
         return override
@@ -830,126 +820,6 @@ def tts_resource_id(speaker=None):
         if spk.endswith(suffix):
             return rid
     return _TTS_RESOURCE_DEFAULT_PUBLIC
-
-
-def _tts_find(d, key, default=None):
-    if isinstance(d, dict):
-        if key in d:
-            return d[key]
-        for v in d.values():
-            r = _tts_find(v, key, None)
-            if r is not None:
-                return r
-    elif isinstance(d, list):
-        for v in d:
-            r = _tts_find(v, key, None)
-            if r is not None:
-                return r
-    return default
-
-
-def _tts_post_once(url, body, api_key, resource_id=None):
-    import urllib.request
-    import urllib.error
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Key": api_key,
-        "X-Api-Resource-Id": resource_id or tts_resource_id(),
-        "X-Api-Request-Id": str(uuid.uuid4()),
-    }
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return r.status, json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        code = e.code
-        try:
-            raw = json.loads(e.read().decode("utf-8", "replace"))
-        except Exception:
-            raw = {"raw": "HTTP " + str(code)}
-        return code, raw
-
-
-def _tts_post(url, body, api_key, submit=False, resource_id=None):
-    """发一次豆包请求，返回 (HTTP 状态, 回复)；连不上（重试用完）返回 (-1, {"exception": …})。
-
-    ST3-P26：临时故障按 `netretry` 重试。`submit=True`（提交任务）只重试确定没发出去的失败和 429 / 503；
-    请求已发出、没收到回复的抛 `StepError(network)`，不自动重新提交（防重复扣费）。
-    """
-    if submit:
-        try:
-            return netretry.call(lambda: _tts_post_once(url, body, api_key, resource_id), service="豆包配音", what="提交",
-                                 retry_exc=netretry.is_unsent_exc,
-                                 retry_on=netretry.http_status_retry(netretry.TRANSIENT_HTTP_SUBMIT))
-        except Exception as e:
-            if netretry.is_transient_exc(e) and not netretry.is_unsent_exc(e):
-                raise StepError(f"豆包 TTS 提交请求已发出、但没收到回复（{netretry.describe_exc(e)}）；"
-                                f"服务端可能已经建了任务，为防重复扣费不自动重新提交，重跑会重新提交",
-                                kind=errors.KIND_NETWORK) from e
-            return -1, {"exception": repr(e)}
-    try:
-        return netretry.call(lambda: _tts_post_once(url, body, api_key, resource_id), service="豆包配音", what="查询",
-                             retry_on=netretry.http_status_retry(netretry.TRANSIENT_HTTP_IDEMPOTENT))
-    except Exception as e:
-        return -1, {"exception": repr(e)}
-
-
-def _real_tts_submit(text, cache_dir):
-    api_key = _require_env("MODEL_SPEECH_API_KEY")
-    speaker = tts_speaker()
-    body = {
-        "user": {"uid": "s1-engine"},
-        "unique_id": str(uuid.uuid4()),
-        "req_params": {
-            "text": text,
-            "speaker": speaker,
-            "audio_params": {
-                "format": "wav",
-                "sample_rate": 24000,
-                "speech_rate": _TTS_SPEECH_RATE,
-                "loudness_rate": 0,
-                "enable_timestamp": True,
-            },
-        },
-    }
-    code, resp = _tts_post(_TTS_BASE + "/submit", body, api_key, submit=True,
-                           resource_id=tts_resource_id(speaker))
-    if code == -1 or (isinstance(resp, dict) and resp.get("code") not in (0, 20000000)):
-        kind = (errors.KIND_NETWORK if code == -1 or code in netretry.TRANSIENT_HTTP
-                else errors.http_kind(code, json.dumps(resp, ensure_ascii=False)) or errors.KIND_SERVICE)
-        raise StepError(f"豆包 TTS 提交失败: HTTP {code} {json.dumps(resp, ensure_ascii=False)[:300]}",
-                        kind=kind)
-    task_id = _tts_find(resp, "task_id") or _tts_find(resp, "taskid")
-    if not task_id:
-        raise StepError(f"豆包 TTS 提交无 task_id: {json.dumps(resp, ensure_ascii=False)[:300]}")
-    return task_id
-
-
-def _real_tts_query(task_id, cache_dir):
-    api_key = _require_env("MODEL_SPEECH_API_KEY")
-    qresp = None
-    status = None
-    code = None
-    for _ in range(240):
-        code, qresp = _tts_post(_TTS_BASE + "/query", {"user": "s1-engine", "task_id": task_id}, api_key,
-                                resource_id=tts_resource_id())
-        if code == -1:
-            break          # 单次查询的网络重试已经用完：不再空转，按 network 失败（任务号留着，续跑接着查）
-        status = _tts_find(qresp, "task_status")
-        if status in (2, 3):
-            break
-        stopflag.sleep(5)          # P31b：任务号已登记，停下后续跑接着查
-    if status != 2:
-        # 轮询耗尽或一直连不上 → network；服务端报失败（status 3 等）→ service_error
-        kind = (errors.KIND_SERVICE if status == 3
-                else errors.KIND_NETWORK if status is None or code == -1
-                else errors.http_kind(code) or errors.KIND_NETWORK)
-        raise StepError(f"豆包 TTS 失败: {json.dumps(qresp, ensure_ascii=False)[:300]}", kind=kind)
-    sentences = _tts_find(qresp, "sentences") or []
-    audio_url = _tts_find(qresp, "audio_url")
-    audio_seconds = sentences[-1].get("endTime") if sentences else 0.0
-    return {"sentences": sentences, "audio_seconds": audio_seconds, "audio_url": audio_url}
 
 
 # ST3-F1 第4项：配音开头留白秒数（首音可能被播放器吃掉，故统一垫 0.3s 静音）。
@@ -1014,83 +884,47 @@ def _write_narration_lock(ctx):
     ctx.log("[S3] 已落定稿锁 -> 01-口播/定稿锁.json")
 
 
-def step_s3(ctx):
-    """配音：统一付费入口 + **异步任务号先落账本**（A5 第 3 条 / §一.4）。"""
-    narr_p = ctx.p("01-口播", "narration.txt")
-    if not narr_p.exists():
-        raise StepError(f"缺少 S1 产物: {narr_p}")
-    tts_text = _tts_text(narr_p.read_text(encoding="utf-8"))
-    if not tts_text:
-        raise StepError("S3 待配音文本为空")
+def _legacy_tts_key(tts_text):
+    """1.2.0 及之前「整篇一次异步合成」的缓存键（不改：老文章清理后靠它原样回放，不重新配音）。"""
+    return paid.cache_key(_SPEECH_MODEL, tts_text,
+                          {"service": "doubao-speech", "speaker": tts_speaker(),
+                           "speech_rate": _TTS_SPEECH_RATE, "sample_rate": 24000, "format": "wav"})
 
-    cache_dir = _cache_dir(ctx, "S3")
-    key = paid.cache_key(_SPEECH_MODEL, tts_text,
-                         {"service": "doubao-speech", "speaker": tts_speaker(),
-                          "speech_rate": _TTS_SPEECH_RATE, "sample_rate": 24000, "format": "wav"})
 
-    doc = _ledger_doc(ctx)
-    submitted = {"n": 0}
+def tts_chunk_key(chunk_text, speaker=None, resource_id=None, model=None):
+    """R121M2：每段流式配音的缓存键 = 段文本 + 音色 + resource id + model + 语速等参数 + `tts-stream-v1`。"""
+    spk = speaker if speaker is not None else tts_speaker()
+    rid = resource_id if resource_id is not None else tts_resource_id(spk)
+    mdl = model if model is not None else tts_stream.model_for(spk)
+    return paid.cache_key(tts_stream.TTS_STREAM_VERSION, chunk_text,
+                          {"service": "doubao-speech-stream", "speaker": spk, "resource_id": rid,
+                           "model": mdl or "", "speech_rate": _TTS_SPEECH_RATE,
+                           "sample_rate": tts_stream.SAMPLE_RATE, "format": tts_stream.TTS_FORMAT,
+                           "enable_subtitle": True})
 
-    def _run():
-        # ① 先查已登记的任务号；查到就接着收，不重复提交（省一次费用）。
-        job = ledger.find_job(doc, "S3", "doubao_speech")
-        if job:
-            task_id = job["task_id"]
-            ctx.log(f"[S3] 续查已登记任务 {task_id}")
-        else:
-            submit = _stub_tts_submit if ctx.stub else _real_tts_submit
-            task_id = retry_submit(ctx, submit, tts_text, cache_dir)
-            submitted["n"] += 1
-            _progress(ctx, "S3", 0, 1, "段", "已提交配音任务，等待合成")
-            # ② 拿到任务号**立即**写进账本，然后才轮询。
-            ledger.add_job(doc, "S3", "doubao_speech", task_id,
-                           note=f"文本 {len(tts_text)} 字")
-            ledger.save_atomic(ctx.root, ledger.touch(doc))
-        query = _stub_tts_query if ctx.stub else _real_tts_query
-        return query(task_id, cache_dir)
 
-    # ST3-P23 §3.4：按提交文本的非空白字数计价；没有句子时间戳的结果算失败（不写缓存）。
-    n_chars = len(re.sub(r"\s", "", tts_text))
-    result = paid.perform(ctx, step="S3", service="doubao_speech", cache_dir=cache_dir,
-                          key=key, describe=f"配音（{len(tts_text)} 字）", quantity=float(n_chars),
-                          invoke_real=_run, invoke_stub=_run,
-                          valid=lambda r: isinstance(r, dict) and bool(r.get("sentences")))
-    if not isinstance(result, dict) or not result.get("sentences"):
-        raise StepError("豆包 TTS 返回的结果里没有句子时间戳（未写缓存）", kind=errors.KIND_SERVICE,
-                        service=errors.SERVICE_SPEECH)
+def tts_cache_state(root, tts_text):
+    """估算 / 回放判断用（只读）：`(还要付费合成的非空白字数, 全部已缓存)`。
 
-    sentences = result.get("sentences") or []
-    audio_seconds = result.get("audio_seconds") or 0.0
-    name = "narration.wav"
+    1.2.0 的整篇缓存（文本 + 音频）都在 → 全部已缓存；否则按段看流式缓存，没命中的段的字数相加。
+    """
+    cache_dir = Path(root) / "03-配音" / "cache"
+    lk = _legacy_tts_key(tts_text)
+    if paid.load_cached(cache_dir, lk)[0] and paid.load_cached(cache_dir, lk + "-wav")[0]:
+        return 0, True
+    left = 0
+    for c in tts_stream.split_chunks(tts_text):
+        k = tts_chunk_key(c["text"])
+        if not (paid.load_cached(cache_dir, k)[0] and paid.load_cached(cache_dir, k + "-pcm")[0]):
+            left += len(re.sub(r"\s", "", c["text"]))
+    return left, left == 0
+
+
+def _s3_write_outputs(ctx, tts_text, sentences, audio_bytes, doc):
+    """写 S3 产物（格式与 1.2.0 相同）、清掉账本里的 S3 旧任务号、落定稿锁。"""
     out_dir = ctx.p("03-配音")
     (out_dir / "audio").mkdir(parents=True, exist_ok=True)
-
-    # ST3-F1 第1项：音频字节单独进缓存（audio_url 一小时过期，不能只存链接）。
-    audio_key = key + "-wav"
-    hit, audio_bytes, _ = paid.load_cached(cache_dir, audio_key)
-    if not hit:
-        if result.get("audio_url"):
-            import urllib.request
-            try:
-                audio_bytes = netretry.call(
-                    lambda: urllib.request.urlopen(result["audio_url"], timeout=120).read(),
-                    service="豆包配音", what="下载音频")
-            except Exception as e:
-                errors.tag_service(e, errors.SERVICE_SPEECH)
-                raise
-        else:
-            audio_bytes = stubs.silence_wav_bytes(audio_seconds)
-        if not audio_bytes:
-            raise StepError("豆包 TTS 音频下载为空（未写缓存）", kind=errors.KIND_SERVICE,
-                            service=errors.SERVICE_SPEECH)
-        paid.store_cached(cache_dir, audio_key, audio_bytes, step="S3", service="doubao_speech")
-    _progress(ctx, "S3", 1, 1, "段")
-
-    # ST3-F1 第4项：开头加 0.3 秒静音，时间戳同步 +0.3（落锁前完成，锁记的是处理后文件）。
-    audio_bytes = _prepend_silence(audio_bytes, _NARRATION_LEAD_IN)
-    sentences = _shift_sentences(sentences, _NARRATION_LEAD_IN)
-
-    (out_dir / "audio" / name).write_bytes(audio_bytes)
+    (out_dir / "audio" / "narration.wav").write_bytes(audio_bytes)
     (out_dir / "sentences.json").write_text(
         json.dumps(sentences, ensure_ascii=False, indent=1), encoding="utf-8")
     (out_dir / "narration_tts.txt").write_text(tts_text + "\n", encoding="utf-8")
@@ -1099,26 +933,240 @@ def step_s3(ctx):
                                           "data": {"sentences": sentences,
                                                    "req_text_length": len(tts_text)}}},
                    ensure_ascii=False, indent=1), encoding="utf-8")
-    # 收到结果 → 清掉已登记的任务号
-    for task_id in [j["task_id"] for j in (doc.get("pending_jobs") or [])
-                    if j.get("step") == "S3"]:
+    # R121M2：1.2.0 及之前留下的异步配音任务号不再查询、不再续用，配完音一并清掉。
+    for task_id in [j["task_id"] for j in (doc.get("pending_jobs") or []) if j.get("step") == "S3"]:
         ledger.remove_job(doc, task_id)
     ledger.save_atomic(ctx.root, ledger.touch(doc))
-
     # ST3-F1 第2项：S1/S2/S3 全部成功后落定稿锁。
     _write_narration_lock(ctx)
 
+
+def _s3_from_legacy(ctx, tts_text, key, cache_dir, doc):
+    """1.2.0 的整篇配音缓存（句子时间戳 + 音频）都在：原样沿用，产物与 1.2.0 逐字节相同，不花钱。"""
+    n_chars = len(re.sub(r"\s", "", tts_text))
+
+    def _never():
+        raise StepError("内部错误：整篇配音缓存应当命中")
+    result = paid.perform(ctx, step="S3", service="doubao_speech", cache_dir=cache_dir, key=key,
+                          describe=f"配音（{len(tts_text)} 字，1.2.0 整篇缓存）", quantity=float(n_chars),
+                          invoke_real=_never, invoke_stub=_never)
+    _hit, audio_bytes, _ = paid.load_cached(cache_dir, key + "-wav")
+    sentences = result.get("sentences") or []
+    audio_bytes = _prepend_silence(audio_bytes, _NARRATION_LEAD_IN)
+    sentences = _shift_sentences(sentences, _NARRATION_LEAD_IN)
+    _progress(ctx, "S3", 1, 1, "段")
+    _s3_write_outputs(ctx, tts_text, sentences, audio_bytes, doc)
+    total_s = sentences[-1].get("endTime") if sentences else 0.0
+    ctx.log(f"[S3] 命中 1.2.0 整篇配音缓存，原样沿用（不重新配音、不花钱）：句 {len(sentences)} / 音频 {total_s:.1f}s")
+    return {"jobs": doc.get("pending_jobs") or [], "source": None}
+
+
+def _s3_chunk(ctx, chunk, cache_dir, speaker, resource_id, model, api_key_fn):
+    """合成一段（经统一付费入口：命中缓存不付费）。返回 (段结果 JSON, PCM 字节, 来源)。"""
+    key = tts_chunk_key(chunk["text"], speaker, resource_id, model)
+    pcm_key = key + "-pcm"
+    hit, _, _ = paid.load_cached(cache_dir, key)
+    pcm_hit, pcm, _ = paid.load_cached(cache_dir, pcm_key)
+    if hit and not pcm_hit:
+        # 段结果在、音频没了（被人删过）：把段结果挪开当没命中，重新合成这一段。
+        meta_p, _ = paid.cache_paths(cache_dir, key)
+        meta_p.replace(meta_p.with_suffix(".json.stale"))
+        hit = False
+    n_chars = len(re.sub(r"\s", "", chunk["text"]))
+    holder = {}
+
+    def _run(opener):
+        r = tts_stream.synth_with_retry(chunk["index"], chunk["text"], speaker=speaker, resource_id=resource_id,
+                                        model=model, api_key=(api_key_fn() if opener is None else "stub"),
+                                        speech_rate=_TTS_SPEECH_RATE,
+                                        opener=opener, log=ctx.log)
+        paid.note_quantity(r["text_words"])
+        # 音频先进缓存，段结果（perform 写）在后：段结果命中就一定有音频。
+        paid.store_cached(cache_dir, pcm_key, r["pcm"], step="S3", service="doubao_speech",
+                          extra={"describe": f"配音第 {chunk['index']} 段音频（PCM {tts_stream.SAMPLE_RATE} Hz）"})
+        holder["pcm"] = r["pcm"]
+        return {"index": chunk["index"], "text": chunk["text"], "sentences": r["sentences"],
+                "samples": len(r["pcm"]) // (tts_stream.SAMPLE_WIDTH * tts_stream.CHANNELS),
+                "text_words": r["text_words"], "request_id": r.get("request_id"),
+                "speaker": speaker, "resource_id": resource_id, "model": model,
+                "version": tts_stream.TTS_STREAM_VERSION}
+
+    def _stub_opener(body, headers, timeout):
+        return 200, iter(stubs.stub_tts_stream_frames(body["req_params"]["text"]))
+
+    result = paid.perform(ctx, step="S3", service="doubao_speech", cache_dir=cache_dir, key=key,
+                          describe=f"配音第 {chunk['index']} 段（{chunk['chars']} 字）", quantity=float(n_chars),
+                          invoke_real=lambda: _run(None), invoke_stub=lambda: _run(_stub_opener),
+                          valid=lambda r: isinstance(r, dict) and bool(r.get("sentences")) and r.get("samples", 0) > 0)
+    if "pcm" in holder:
+        pcm = holder["pcm"]
+        src = "桩" if ctx.stub else "真实"
+    else:
+        src = "缓存"
+        if not pcm:
+            _h, pcm, _ = paid.load_cached(cache_dir, pcm_key)
+    if not isinstance(result, dict) or not result.get("sentences") or not pcm:
+        raise StepError(f"配音第 {chunk['index']} 段没有拿到音频或字级时间戳（未写缓存）",
+                        kind=errors.KIND_SERVICE, service=errors.SERVICE_SPEECH)
+    return result, pcm, src
+
+
+def _offset_sentences(sentences, offset_sec):
+    """一段的句子 / 字级时间加上本段在整篇里的起点（秒），整理成 sentences.json 的结构。"""
+    out = []
+    prev_end = 0.0
+    for s in sentences:
+        words = []
+        base = 0.0
+        ws = s.get("words") or []
+        # 流式返回的字级时间按本段音频开头算；万一某句又从 0 开始（按句重置），接在上一句后面。
+        if ws and out and float(ws[0].get("startTime", 0)) + 1e-6 < prev_end - offset_sec - 0.05:
+            base = prev_end - offset_sec
+        for w in ws:
+            words.append({"confidence": w.get("confidence", 0),
+                          "endTime": round(float(w.get("endTime", 0)) + base + offset_sec, 3),
+                          "startTime": round(float(w.get("startTime", 0)) + base + offset_sec, 3),
+                          "word": w.get("word", "")})
+        if not words:
+            continue
+        text = s.get("text") or "".join(w["word"] for w in words)
+        out.append({"endTime": words[-1]["endTime"], "startTime": words[0]["startTime"],
+                    "text": text, "words": words})
+        prev_end = words[-1]["endTime"]
+    return out
+
+
+def _write_stream_chunks(ctx, chunks, extra=None):
+    doc = {"schema_version": 1, "version": tts_stream.TTS_STREAM_VERSION,
+           "max_chars": tts_stream.TTS_STREAM_MAX_CHARS, "sample_rate": tts_stream.SAMPLE_RATE,
+           "lead_in_sec": _NARRATION_LEAD_IN,
+           "paragraph_gap_sec": tts_stream.TTS_STREAM_PARAGRAPH_GAP_SEC,
+           "sentence_gap_sec": tts_stream.TTS_STREAM_SENTENCE_GAP_SEC}
+    doc.update(extra or {})
+    doc["chunks"] = chunks
+    out = ctx.p("03-配音")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "stream_chunks.json").write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def step_s3(ctx):
+    """配音（R121M2 起：豆包单向流式，按段合成后拼接）。
+
+    1. 口播稿按段落切、超过 300 字的段再按句切（`tts_stream.split_chunks`），切段结果写 `03-配音/stream_chunks.json`；
+    2. 每段一次流式请求（经统一付费入口，按段缓存；最多同时 3 段），结果按序号拼接；
+    3. 每段的偏移 = 它之前所有段的**实际采样点数**（加开头 0.3 秒留白和段间静音），字级时间加上偏移；
+    4. 产物（narration.wav / sentences.json / query_response.json / narration_tts.txt）格式与 1.2.0 相同，下游不动。
+    1.2.0 的整篇配音缓存还在时原样沿用；账本里旧的异步任务号直接忽略（不查询、不续用）。
+    """
+    narr_p = ctx.p("01-口播", "narration.txt")
+    if not narr_p.exists():
+        raise StepError(f"缺少 S1 产物: {narr_p}")
+    tts_text = _tts_text(narr_p.read_text(encoding="utf-8"))
+    if not tts_text:
+        raise StepError("S3 待配音文本为空")
+
+    cache_dir = _cache_dir(ctx, "S3")
+    doc = _ledger_doc(ctx)
+    old_jobs = [j for j in (doc.get("pending_jobs") or []) if j.get("step") == "S3"]
+    if old_jobs:
+        ctx.log(f"[S3] 账本里有 {len(old_jobs)} 个 1.2.0 留下的异步配音任务号"
+                f"（{', '.join(str(j.get('task_id')) for j in old_jobs)}），1.2.1 起不再查询、不再续用，直接忽略")
+
+    legacy_key = _legacy_tts_key(tts_text)
+    if (paid.load_cached(cache_dir, legacy_key)[0]
+            and paid.load_cached(cache_dir, legacy_key + "-wav")[0]):
+        return _s3_from_legacy(ctx, tts_text, legacy_key, cache_dir, doc)
+
+    speaker = tts_speaker()
+    resource_id = tts_resource_id(speaker)
+    model = tts_stream.model_for(speaker)
+    chunks = tts_stream.split_chunks(tts_text)
+    if not chunks:
+        raise StepError("S3 待配音文本为空")
+    info = {"speaker": speaker, "resource_id": resource_id, "model": model}
+    _write_stream_chunks(ctx, chunks, info)
+    long_ones = [c["index"] for c in chunks if c["over_limit"]]
+    if long_ones:
+        ctx.log(f"[S3] 第 {', '.join(map(str, long_ones))} 段是一整句、超过 {tts_stream.TTS_STREAM_MAX_CHARS} 字，"
+                f"不在句子中间切，整句送出")
+
+    def _key():
+        return _require_env("MODEL_SPEECH_API_KEY")
+
+    total = len(chunks)
+    results = [None] * total
+    done = 0
+    first_err = None
+    _progress(ctx, "S3", 0, total, "段", f"配音共 {total} 段")
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 同一篇里文字完全相同的段（缓存键相同）只合成一次，其余直接复用，不并发重复付费。
+    first_of = {}
+    for i, c in enumerate(chunks):
+        first_of.setdefault(c["text"], i)
+    with ThreadPoolExecutor(max_workers=tts_stream.TTS_STREAM_CONCURRENCY) as pool:
+        futs = {pool.submit(_s3_chunk, ctx, c, cache_dir, speaker, resource_id, model, _key): i
+                for i, c in enumerate(chunks) if first_of[c["text"]] == i}
+        for fut in as_completed(futs):
+            i = futs[fut]
+            try:
+                results[i] = fut.result()
+            except BaseException as e:            # noqa: BLE001 — 停止标记 / 付费拦截也要先收拢再抛
+                if first_err is None or i < first_err[0]:
+                    first_err = (i, e)
+                for f in futs:
+                    f.cancel()                    # 还没开始的段不再发；已在合成的段让它做完（结果进缓存，不白花钱）
+                continue
+            done += 1 + sum(1 for k, c in enumerate(chunks) if k != i and first_of[c["text"]] == i)
+            _progress(ctx, "S3", done, total, "段", f"配音第 {chunks[i]['index']} 段完成")
+    if first_err is not None:
+        raise first_err[1]
+    for i, c in enumerate(chunks):
+        j = first_of[c["text"]]
+        if j != i:
+            res, pcm, _src = results[j]
+            results[i] = (res, pcm, f"同第 {chunks[j]['index']} 段")
+
+    # 拼接：开头 0.3 秒留白；段落之间 / 段内句子之间按常量补静音；偏移一律按实际采样点数算。
+    sr = tts_stream.SAMPLE_RATE
+    frame = tts_stream.SAMPLE_WIDTH * tts_stream.CHANNELS
+    lead = int(round(_NARRATION_LEAD_IN * sr))
+    pcm_parts = [b"\x00" * (lead * frame)]
+    offset = lead
+    sentences = []
+    for c, (res, pcm, src) in zip(chunks, results):
+        if c["index"] > 1:
+            gap_s = (tts_stream.TTS_STREAM_PARAGRAPH_GAP_SEC if c["paragraph_start"]
+                     else tts_stream.TTS_STREAM_SENTENCE_GAP_SEC)
+            gap = int(round(gap_s * sr))
+            pcm_parts.append(b"\x00" * (gap * frame))
+            offset += gap
+        samples = len(pcm) // frame
+        c.update({"offset_samples": offset, "offset_sec": round(offset / sr, 6), "samples": samples,
+                  "seconds": round(samples / sr, 3), "text_words": res.get("text_words"),
+                  "source": src, "sentences": len(res.get("sentences") or [])})
+        sentences.extend(_offset_sentences(res["sentences"], offset / sr))
+        pcm_parts.append(pcm[:samples * frame])
+        offset += samples
+    import io
+    buf = io.BytesIO()
+    w = wave.open(buf, "wb")
+    w.setnchannels(tts_stream.CHANNELS)
+    w.setsampwidth(tts_stream.SAMPLE_WIDTH)
+    w.setframerate(sr)
+    w.writeframes(b"".join(pcm_parts))
+    w.close()
+    audio_bytes = buf.getvalue()
+    if not sentences:
+        raise StepError("豆包流式配音没有返回字级时间戳（未写产物）", kind=errors.KIND_SERVICE,
+                        service=errors.SERVICE_SPEECH)
+    _write_stream_chunks(ctx, chunks, dict(info, total_samples=offset, total_sec=round(offset / sr, 3)))
+    _s3_write_outputs(ctx, tts_text, sentences, audio_bytes, doc)
+
     st = ctx.paid_stats
-    total_s = sentences[-1].get("endTime") if sentences else (audio_seconds + _NARRATION_LEAD_IN)
-    ctx.log(f"[S3] 句 {len(sentences)} / 音频 {total_s:.1f}s / 调用 {st['calls']}"
-            f" / 命中 {st['hits']} / 桩 {st['stub_calls']} -> {out_dir / 'audio' / name}")
+    ctx.log(f"[S3] 流式配音 {total} 段 / 句 {len(sentences)} / 音频 {offset / sr:.1f}s / 调用 {st['calls']}"
+            f" / 命中 {st['hits']} / 桩 {st['stub_calls']} -> {ctx.p('03-配音', 'audio', 'narration.wav')}")
     return {"jobs": doc.get("pending_jobs") or [],
-            "source": ("桩（静音 WAV + 字级时间戳）" if st["stub_calls"] else None)}
-
-
-def retry_submit(ctx, submit, text, cache_dir):
-    """提交（真实/桩）——单独一个函数，便于演练脚本注入"提交后中断"。"""
-    return submit(text, cache_dir)
+            "source": ("桩（静音 PCM + 字级时间戳，流式格式）" if st["stub_calls"] else None)}
 
 
 def step_s8(ctx):
@@ -2263,7 +2311,7 @@ class _NoReply(Exception):
 
 
 def _runtime_font(ctx):
-    """渲染端左栏用的字体文件（若运行时目录提供）。没有时量宽改用系统字体。"""
+    """渲染端左栏用的字体文件（运行时目录里的霞鹜文楷）。排版量宽和渲染用同一个文件。"""
     fp = Path(ctx.runtime_node_modules).parent / paths.FONT_REL
     return fp if fp.is_file() else None
 
@@ -2420,7 +2468,10 @@ def _gap_requirements(ctx, records, data):
 def _decide_records(ctx):
     """S7 真算：调 `orchestrate.decide_records`，deps 全部经统一付费入口。"""
     from pipeline import orchestrate
-    from pipeline.table_prompt import build_table_prompt
+    try:
+        from r168_gen import build_table_prompt
+    except Exception:
+        build_table_prompt = None
 
     im_rel = ("05-截图分析" if ctx.resolved_content_type == spec.CONTENT_TYPE_SCREENSHOT
               else "06-编排")
@@ -2853,6 +2904,11 @@ def rerun_reason(root, sid):
         miss = missing_illustrations(root)
         if miss:
             return f"缺图 {len(miss)} 张，只为它们重新出图（{'、'.join(miss)}）"
+        # R120M：出图方式 / MOSS 风格 / 补图开关换了 → 重跑 S8（每张图先查各自的缓存，不重复出图）。
+        # GPT 方式且上次也是 GPT（没有 07-出图/出图方式.json）时两边都是 None，与 1.1.0 相同。
+        cur = moss.selected_or_gpt().signature()
+        if cur != moss.recorded_signature(root):
+            return f"出图设置变了（现在：{moss.selected_or_gpt().describe()}），重跑出图（先查缓存）"
         return None
     if sid == "S4":
         align_p = root / "04-对齐" / "alignment.json"
@@ -3182,15 +3238,38 @@ def step_s8(ctx):
     made = skipped = 0
     missing = []
     order = {}
+    # R120M：出图方式。GPT（默认）时 routes / eff_keys 都是空的，下面每一处都与 1.1.0 相同。
+    mcfg = moss.selected_or_gpt()
+    routes, eff_keys = {}, {}
+    if mcfg.moss:
+        for it in items:
+            if it.get("请求内容哈希") and it.get("文件名"):
+                r = moss.route(it, mcfg)
+                routes[it["文件名"]] = r
+                if r.moss:
+                    eff_keys[it["文件名"]] = r.item_key
+                elif r.gpt_key:
+                    # R120M3 §3：标注文字多于 8 个、按规则走 GPT 的图改用仿 MOSS 的提示词，按它的键判断旧图
+                    eff_keys[it["文件名"]] = r.gpt_key
     # R101 B：旧图能不能用只看内容（缓存键），不看文件名在不在（组号前移时旧文件名会指向别的组的图）。
-    plan = illustration_plan(ctx.root, items)
+    # R120M：MOSS 出的图按它的内容键（moss.item_key）判定；按规则走 GPT 的图按它实际用的提示词的键
+    # （R120M3：多于 8 个标注文字的用仿 MOSS 提示词的键，其余按原来的 GPT 键）。
+    plan = illustration_plan(ctx.root, items if not eff_keys else
+                             [dict(it, 请求内容哈希=eff_keys[it["文件名"]]) if it.get("文件名") in eff_keys
+                              else it for it in items])
     img_rec = _load_illustration_record(ctx.root)
     redo = {"changed": 0, "nomatch": 0, "norecord": 0}
+    runner = moss.Runner(ctx, mcfg, ctx.p("07-出图", moss.CACHE_SUBDIR)) if mcfg.moss else None
+    detail = []                # R120M：MOSS 方式的逐张明细（logs/出图明细.json）
+    prev_detail = {}
+    if mcfg.moss:
+        prev = moss.load_json(ctx.p(moss.DETAIL_REL)) or {}
+        prev_detail = {e.get("文件名"): e for e in (prev.get("items") or []) if isinstance(e, dict)}
 
     def _record(it, dest):
         """写出一张图后，把它的缓存键记进图片记录（每张都落盘：中途停下也不丢）。"""
         with _S8_FILE_LOCK:
-            img_rec[it["文件名"]] = {"请求内容哈希": it["请求内容哈希"],
+            img_rec[it["文件名"]] = {"请求内容哈希": eff_keys.get(it["文件名"], it["请求内容哈希"]),
                                     "sha256": hashlib.sha256(dest.read_bytes()).hexdigest(),
                                     "time": ledger.now_iso()}
             _save_illustration_record(ctx.root, img_rec)
@@ -3310,7 +3389,42 @@ def step_s8(ctx):
         active[it["文件名"]] = th
         th.start()
 
+    def _write_detail(error=None):
+        """R120M：MOSS 方式的逐张明细与出图前检查结果（失败早停时也写，便于排查）。"""
+        if not mcfg.moss:
+            return
+        doc_d = {"schema_version": 1, "updated": ledger.now_iso(),
+                 "出图方式": mcfg.backend, "出图方式名": moss.BACKEND_NAMES[mcfg.backend],
+                 "风格": mcfg.style, "风格名": moss.style_name(mcfg.style),
+                 **({"RH应用": imagegen.RH_MOSS_APP["webapp_id"],
+                     "RH并发": runner.concurrency_report() if runner is not None else None}
+                    if mcfg.rh else {"ComfyUI地址": mcfg.url}),
+                 "不合格时用GPT补图": bool(mcfg.fallback),
+                 "每张最多候选数": moss.MOSS_MAX_CANDIDATES,
+                 "GPT仿MOSS画风": (moss.gpt_style().get("版本") if moss.gpt_style_digest() else None),
+                 "工作流": moss.WORKFLOW_VERSION,
+                 "版式规则": moss.layout_rules().LAYOUT_RULES_VERSION,
+                 "判图规则": moss.ocr_gate().OCR_GATE_VERSION,
+                 "出图前检查": runner.pre if runner is not None else None,
+                 "计数": moss.summarize(detail), "items": detail}
+        if mcfg.rh:
+            n_sub = doc_d["计数"]["rh_submits"]
+            doc_d["RH币消耗估"] = {"本次提交RH": n_sub, "每张约": moss.RH_COINS_PER_IMAGE,
+                                 "合计约": moss.rh_coins(n_sub), "说明": "RH 币，不计入人民币费用"}
+        if error:
+            doc_d["停在"] = error
+        p_d = ctx.p(moss.DETAIL_REL)
+        p_d.parent.mkdir(parents=True, exist_ok=True)
+        p_d.write_text(json.dumps(doc_d, ensure_ascii=False, indent=1), encoding="utf-8")
+
     try:
+        # R120M §2.2：MOSS 方式下有要真出的图时，先做出图前检查（不花钱），不通过就早停。
+        if runner is not None and any(r.moss and plan.get(f) != "reuse" and runner.needs_service(r)
+                                      for f, r in routes.items()):
+            runner.ensure_ready()
+        if runner is not None and mcfg.rh:
+            # R121M §6：MOSS · RH 自动并发（起始 3 个任务同时出，被拒降为 1；结果按清单顺序取用）。
+            runner.prefetch([(r, f) for f, r in routes.items() if r.moss and plan.get(f) != "reuse"])
         for idx, it in enumerate(items):
             key = it.get("请求内容哈希")
             if not key:
@@ -3322,6 +3436,11 @@ def step_s8(ctx):
             dest = img_dir / fname
             state = plan.get(fname, "new")
             if state == "reuse":
+                if mcfg.moss:
+                    old = prev_detail.get(fname)
+                    detail.append(dict(old, 本次="已有图片，沿用") if old else
+                                  {"组号": it.get("组号"), "文件名": fname, "插画类型": it.get("插画类型"),
+                                   "方式": "已有", "本次": "已有图片，沿用"})
                 skipped += 1          # A5 第 2 条：已有的图不重出（R101 B：缓存键一致才算"已有"）
                 if fname not in img_rec:      # 旧文章：键从旧 manifest 还原，补进图片记录
                     _record(it, dest)
@@ -3334,6 +3453,55 @@ def step_s8(ctx):
             if sched.stop.is_set():
                 break
             stopflag.check()          # P31b：每张图开始前看停止标记（完成 / 失败一张后的进度回调里也看）
+            r = routes.get(fname)
+            gpt_it = it                # 要用 GPT 出这一张时交给 GPT 的那一项（MOSS 方式下换成仿 MOSS 提示词）
+            if r is not None:
+                # R120M：MOSS 方式。能走 MOSS 的在主线程里串行出（ComfyUI 同一时间只跑 1 个任务）；
+                # 合格就用；不合格且开了补图、或按规则走 GPT 的，落到下面原有的 GPT 路径（先查缓存）。
+                ent = {"组号": it.get("组号"), "文件名": fname, "插画类型": it.get("插画类型"),
+                       "标注文字": r.labels}
+                detail.append(ent)
+                if not r.moss:
+                    ent.update({"方式": "gpt_rule", "原因": r.reason})
+                    if r.gpt_prompt:
+                        ent["GPT提示词"] = "仿 MOSS 画风"
+                        gpt_it = r.gpt_item(it)
+                    ctx.log(f"[S8] {fname} 按规则走 GPT：{r.reason}" + ("（仿 MOSS 画风）" if r.gpt_prompt else ""))
+                else:
+                    ent["模板"] = r.scene_key
+                    res = runner.run(r, fname)
+                    ent.update({"候选数": len(res["candidates"]),
+                                "候选": moss.public_candidates(res["candidates"])})
+                    if res["ok"] or (not mcfg.fallback and res["png"]):
+                        dest.write_bytes(res["png"])
+                        _record(it, dest)
+                        made += 1
+                        st["done"] += 1
+                        if res["ok"]:
+                            ent.update({"方式": "moss", "采用第几张": res["chosen"]})
+                        else:
+                            ent.update({"方式": "moss_red", "采用第几张": res["chosen"],
+                                        "原因": f"{len(res['candidates'])} 张都不合格，补图开关关闭：用了缺字最少的一张"})
+                            ctx.log(f"[S8] {fname} MOSS {len(res['candidates'])} 张都不合格，补图关闭："
+                                    f"用第 {res['chosen']} 张（标红）")
+                        _tick()
+                        continue
+                    if not mcfg.fallback:
+                        missing.append(fname)
+                        ent.update({"方式": "missing", "原因": f"{len(res['candidates'])} 张候选都没出成，补图开关关闭"})
+                        ctx.log(f"[S8] 缺图 {fname}：MOSS {len(res['candidates'])} 张候选都没出成，补图关闭")
+                        st["done"] += 1
+                        _tick(f"{fname} 出图失败，记为缺图")
+                        continue
+                    n_c = len(res["candidates"])
+                    ent.update({"方式": "gpt_fallback", "原因": f"MOSS {n_c} 张都不合格，改用 GPT 补这一张"})
+                    if r.gpt_prompt:
+                        ent["GPT提示词"] = "仿 MOSS 画风"
+                        gpt_it = r.gpt_item(it)
+                    ctx.log(f"[S8] {fname} MOSS {n_c} 张都不合格，改用 GPT 补这一张"
+                            + ("（仿 MOSS 画风）" if r.gpt_prompt else ""))
+            it = gpt_it
+            key = it["请求内容哈希"]
             # 命中缓存 / 桩 / --no-paid：不发请求，主线程里直接处理（顺序、事件与以前逐张串行时一样）。
             if ctx.stub or ctx.no_paid or paid.load_cached(cache_dir, key)[0]:
                 try:
@@ -3370,10 +3538,12 @@ def step_s8(ctx):
         sched.stop.set()
         if isinstance(e, KeyboardInterrupt):
             _wind_down()
+        _write_detail(error=f"{type(e).__name__}: {e}")
         raise
     if errs:
         if isinstance(errs[0], KeyboardInterrupt):
             _wind_down()        # 停止是某张图的线程先发现的（统一付费入口 / 重试等待里）
+        _write_detail(error=f"{type(errs[0]).__name__}: {errs[0]}")
         raise errs[0]
     if total == 0:
         _progress(ctx, "S8", 0, 0, "张")
@@ -3401,6 +3571,34 @@ def step_s8(ctx):
             ledger.save_atomic(ctx.root, ledger.touch(doc))
             ctx.log(f"[S8] 清掉已收取的出图任务号 {len(stale)} 个："
                     + "、".join(f"{j.get('task_id')}（{j.get('note')}）" for j in stale))
+    # R120M：出图方式记录（变了就重跑 S8）与逐张明细。GPT 方式删掉上一次 MOSS 留下的这两个文件（没有就不动）。
+    set_p = ctx.p(moss.SETTING_REL)
+    if mcfg.moss:
+        _write_detail()
+        set_p.write_text(json.dumps({"signature": mcfg.signature(), "说明": "上一次出图用的设置；"
+                                     "与现在的设置不同时 S8 重跑（每张图先查缓存）"}, ensure_ascii=False,
+                                    indent=1), encoding="utf-8")
+        cnt = moss.summarize(detail)
+        ctx.log(f"[S8] {moss.BACKEND_NAMES[mcfg.backend]}（{mcfg.style}）：第 1 张即合格 {cnt['moss_first']}"
+                f" / 第 2 张合格 {cnt['moss_second']} / 第 3 张合格 {cnt['moss_third']}"
+                f" / 不合格改用 GPT {cnt['moss_to_gpt']} / 按规则走 GPT {cnt['rule_gpt']}"
+                f" / 标红 {cnt['red']}"
+                + (f" / 提交 RH {cnt['rh_submits']} 次（约 {moss.rh_coins(cnt['rh_submits'])} RH 币）"
+                   if mcfg.rh else "")
+                + f" -> {ctx.p(moss.DETAIL_REL)}")
+        cc = runner.concurrency_report() if runner is not None else None
+        if cc:
+            ctx.log(f"[S8] MOSS · RH 并发：起始 {cc['起始并发']}，最高同时 {cc['最高同时']}，"
+                    + (f"{cc['降级时间']} 降为 1（{cc['降级原因']}；被拒重提 {cc['被拒重提次数']} 次）"
+                       if cc["降级"] else "未降级"))
+        if any(e.get("候选") and not all(c.get("来自缓存") for c in e["候选"]) for e in detail):
+            lab = f"{mcfg.backend}:{mcfg.style}"
+            if lab not in sched.used:
+                sched.used.insert(0, lab)
+    else:
+        for p_old in (set_p, ctx.p(moss.DETAIL_REL)):
+            if p_old.exists():
+                p_old.unlink()
     pst = ctx.paid_stats
     ctx.log(f"[S8] 清单 {len(items)} 项 / 新出 {made} / 已有跳过 {skipped}"
             f" / 内容变了重做 {redo['changed']} / 旧图不符重做 {redo['nomatch']}"
@@ -3729,6 +3927,29 @@ def _check_tts_completeness(ctx, data):
     return check_tts_groups(body, words)
 
 
+# R121M §2：出图方式为 MOSS（本地 / RH）时插画场景铺满 1920×1080（渲染层按这个标记 cover 铺满）。
+FULL_BLEED_KEY = "fullBleed"
+_ELEMENT_SCENE_TYPES = ("code_card", "terminal", "table")
+
+
+def _moss_full_bleed(root):
+    """这篇的插画是不是按 MOSS 方式出的（看 S8 记下的 `07-出图/出图方式.json`；GPT 方式 S8 会删掉它）。"""
+    sig = moss.recorded_signature(root)
+    return isinstance(sig, dict) and sig.get("backend") in moss.MOSS_BACKENDS
+
+
+def mark_full_bleed(scenes):
+    """给插画场景（AI 出的图，含 MOSS 不合格后 GPT 补的、按规则走 GPT 的）加 `fullBleed: true`。
+    截图、原图、代码 / 命令 / 表格卡片不加（仍在原来的框里）。返回加了几个。"""
+    n = 0
+    for sc in scenes:
+        if (sc.get("image") and not sc.get("is_original") and not sc.get("shot")
+                and sc.get("type") not in _ELEMENT_SCENE_TYPES and sc.get("type") != "screenshot"):
+            sc[FULL_BLEED_KEY] = True
+            n += 1
+    return n
+
+
 def step_s9(ctx):
     from pipeline import orchestrate, scene_build
 
@@ -3797,6 +4018,10 @@ def step_s9(ctx):
                                     image_map=json.loads(im_p.read_text(encoding="utf-8")) if im_p.exists() else None,
                                     article_text=art_p.read_text(encoding="utf-8") if art_p.exists() else None,
                                     strict=False, **kw)
+    # R121M §2.2：MOSS 方式才写全屏标记；GPT 方式不写这个字段（场景数据与 1.2.0 逐字节相同）。
+    if _moss_full_bleed(ctx.root):
+        n_fb = mark_full_bleed(data["scenes"])
+        ctx.log(f"[S9] 出图方式为 MOSS：插画场景 {n_fb} 个铺满全屏（{FULL_BLEED_KEY}）")
 
     (out_dir / "video_data.json").write_text(
         json.dumps(data, ensure_ascii=False, indent=indent), encoding="utf-8")
@@ -3943,9 +4168,13 @@ def step_s9(ctx):
 
 _RENDER_WRAPPER = (
     "import sys\n"
+    # R110W：渲染子进程也要先装规则保护钩子，否则打包模式里 render_mux（在加密归档里）导入失败。
+    "from pipeline.engine import _protect as _p; _p.install()\n"
     "from pipeline import render_mux\n"
+    # R120M2 Q1：node / ffmpeg 的绝对路径由引擎主进程定位好传进来（argv[6] / argv[7]），不依赖 PATH。
     "render_mux.render_mux(sys.argv[1], sys.argv[2], sys.argv[3], cwd=sys.argv[4],\n"
-    "                      concurrency=int(sys.argv[5]), keep_temp=False)\n"
+    "                      concurrency=int(sys.argv[5]), keep_temp=False,\n"
+    "                      node=sys.argv[6], ffmpeg=sys.argv[7])\n"
 )
 
 
@@ -4006,16 +4235,39 @@ def render_percent(line):
     return None
 
 
+RENDER_TAIL_LINES = 30      # R120M2 Q1.3：渲染失败时带上输出的最后 30 行
+
+
+def decode_console_line(raw):
+    """子进程输出的一行字节 → 文本。先按 UTF-8（node / Remotion 输出的是 UTF-8）；解不了就按
+    系统代码页（Windows 上 mbcs = 中文系统的 GBK，cmd、系统报错用它），errors=replace 永不抛错。"""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if os.name == "nt":
+        enc = "mbcs"
+    else:
+        import locale
+        enc = locale.getpreferredencoding(False) or "utf-8"
+    try:
+        return raw.decode(enc, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
 def _pump_render_output(stream, state):
     """读渲染子进程的输出（按 \r / \n 切行）：进度行只记最新百分比（日志里每 10 秒留一条），
-    其他行原样转到 stderr + 日志。在后台线程里跑。"""
-    import codecs
-    dec = codecs.getincrementaldecoder("utf-8")("replace")
-    buf = ""
+    其他行原样转到 stderr + 日志，并留下最后 RENDER_TAIL_LINES 行（失败时写进日志和失败事件）。
+    在后台线程里跑。按字节切行再逐行解码：GBK 的第二字节不会是 \r / \n，切行不会切坏中文。"""
+    from collections import deque
+    tail = state.setdefault("tail", deque(maxlen=RENDER_TAIL_LINES))
+    buf = b""
     last_logged = 0.0
 
-    def handle(line):
+    def handle(raw):
         nonlocal last_logged
+        line = decode_console_line(raw)
         if not line.strip():
             return
         pct = render_percent(line)
@@ -4024,6 +4276,8 @@ def _pump_render_output(stream, state):
             if time.time() - last_logged < 10:
                 return
             last_logged = time.time()
+        else:
+            tail.append(_ANSI_RE.sub("", line).rstrip())
         try:
             sys.stdout.write(_ANSI_RE.sub("", line) + "\n")
             sys.stdout.flush()
@@ -4034,19 +4288,31 @@ def _pump_render_output(stream, state):
         chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
         if not chunk:
             break
-        buf += dec.decode(chunk)
-        parts = re.split(r"[\r\n]", buf)
+        buf += chunk
+        parts = re.split(rb"[\r\n]", buf)
         buf = parts.pop()
         for ln in parts:
             handle(ln)
-    buf += dec.decode(b"", final=True)
     handle(buf)
 
 
-def _run_render(rp, out_mp4, concurrency=4, progress=None, argv=None):
+def render_tools(log=None):
+    """R120M2 Q1：定位渲染要用的 node、ffmpeg（绝对路径），日志里写明用的是哪一个。
+    找不到时报渲染失败（打包模式不会回退到系统 PATH）。"""
+    try:
+        node, node_src = paths.find_node()
+        ffmpeg, ffmpeg_src = paths.find_ffmpeg_tool("ffmpeg")
+    except paths.ToolNotFound as e:
+        raise StepError(f"渲染环境不完整：{e}", kind=errors.KIND_RENDER) from e
+    if log is not None:
+        log(f"[S10] 渲染用 node: {node}（{node_src}）；ffmpeg: {ffmpeg}（{ffmpeg_src}）")
+    return node, ffmpeg
+
+
+def _run_render(rp, out_mp4, concurrency=4, progress=None, argv=None, log=None):
     """在子进程里跑 render_mux，主线程轮询等待——让中断（SIGINT/SIGBREAK）真的能被接住。
 
-    不能直接在主线程里调 render_mux：它内部是 `subprocess.run(..., shell=True)` 的不可中断
+    不能直接在主线程里调 render_mux：它内部是 `subprocess.run(...)` 的不可中断
     等待。引擎装了 SIGBREAK 处理器以后，Python 把 CTRL_BREAK 记下来留给主线程执行，而主线程
     正卡在 C 调用里出不来，事件就被吞掉（实测见 ST1-P2-理论型装线\\_probe_ctrlbreak8.py 的
     U/V 两例：阻塞式等待收不到、轮询式 0.2s 内就退出 7）。轮询每 0.2s 回到一次解释器，信号
@@ -4056,8 +4322,10 @@ def _run_render(rp, out_mp4, concurrency=4, progress=None, argv=None):
     不会混进事件流），从 Remotion 的进度行算百分比；`progress(pct)` 在主线程的轮询里调用。
     """
     import threading
-    argv = argv or [sys.executable, "-c", _RENDER_WRAPPER, "src/index-r125.ts", "R125-字幕调整",
-                    str(out_mp4), str(rp), str(concurrency)]
+    if argv is None:
+        node, ffmpeg = render_tools(log)
+        argv = [sys.executable, "-c", _RENDER_WRAPPER, "src/index-r125.ts", "R125-字幕调整",
+                str(out_mp4), str(rp), str(concurrency), node, ffmpeg]
     env = render_env()
     env["PYTHONDONTWRITEBYTECODE"] = "1"   # 子进程别往主仓写 .pyc
     env["PYTHONUNBUFFERED"] = "1"
@@ -4083,7 +4351,13 @@ def _run_render(rp, out_mp4, concurrency=4, progress=None, argv=None):
         raise
     reader.join(timeout=10)
     if p.returncode != 0:
-        raise StepError(f"渲染失败（render_mux 退出码 {p.returncode}）", kind=errors.KIND_RENDER)
+        tail = "\n".join(state.get("tail") or [])
+        if log is not None and tail:
+            log(f"[S10] 渲染输出最后 {len(state['tail'])} 行：\n{errors.redact(tail)}")
+        e = StepError(f"渲染失败（render_mux 退出码 {p.returncode}）", kind=errors.KIND_RENDER)
+        if tail:
+            e.provider_raw = tail          # 失败事件的 provider_message（脱敏在 errors.provider_message 里做）
+        raise e
 
 
 def _find_asset(ctx, name):
@@ -4191,7 +4465,7 @@ def _make_contact_sheet(ctx, mp4):
     COLS, ROWS = 3, 4
     CELL_W, CELL_H = 480, 270
 
-    r = _sp.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+    r = _sp.run([paths.ffmpeg_exe("ffprobe"), "-v", "error", "-show_entries", "format=duration",
                  "-of", "csv=p=0", str(mp4)], capture_output=True, text=True, timeout=60)
     dur = float(r.stdout.strip())
 
@@ -4214,7 +4488,7 @@ def _make_contact_sheet(ctx, mp4):
         frames = []
         for s in secs:
             fp = os.path.join(tmp, f"f{s:05d}.jpg")
-            _sp.run(["ffmpeg", "-y", "-v", "error", "-ss", str(s), "-i", str(mp4),
+            _sp.run([paths.ffmpeg_exe("ffmpeg"), "-y", "-v", "error", "-ss", str(s), "-i", str(mp4),
                      "-frames:v", "1", "-vf", f"scale={CELL_W}:{CELL_H}", fp],
                     check=True, capture_output=True)
             frames.append((s, fp))
@@ -4351,14 +4625,38 @@ def _timeline_checks(ctx, data):
         sentences = _load_json(ctx, "03-配音/sentences.json")
     except Exception:
         sentences = []
-    sub_norm, line_of, line_start = [], [], []
+    # R121M3：一条字幕行里可能装好几句（流式配音的句子更长）。只拿句首和行首比，行内第 2、3 句
+    # 天然晚于行首，会误报（R121W1 §6.2 三条红）。改为先定句首落在哪一行、是行里第几个字：
+    #   - 句首就是行首（老文章全是这样）→ 照旧比行首，结果与改前逐条相同；
+    #   - 句首在行中间 → 句首时间要落在这一行的显示时间内（容差 2 秒），并且与这个字
+    #     自己的时间（chars[].f，有就比）相差不超过 2 秒。整体平移、单行错位仍能抓到。
+    sub_norm, line_of, line_start, line_end, line_first, sub_f = [], [], [], [], [], []
     for li, ln in enumerate(subs):
-        line_start.append(int(ln.get("start_frame") or 0))
+        ls_f, le_f = int(ln.get("start_frame") or 0), int(ln.get("end_frame") or 0)
+        line_start.append(ls_f)
+        line_end.append(le_f)
+        line_first.append(len(sub_norm))
         for c in ln.get("chars") or []:
+            f = c.get("f")
+            # 字的时间只在落在本行显示范围内时才用（scene_build 对没时间的字填 0）
+            f = int(f) if isinstance(f, (int, float)) and ls_f <= f <= le_f else None
             for nc in align_global.normalize_char(c.get("c") or ""):
                 sub_norm.append(nc)
                 line_of.append(li)
+                sub_f.append(f)
     joined = "".join(sub_norm)
+
+    def deviation(k, st):
+        """句首落在字幕第 k 个字时，句子时间与字幕的偏差（秒）。"""
+        li = line_of[k]
+        ls, le = line_start[li] / fps, line_end[li] / fps
+        if k == line_first[li]:
+            return abs(ls - st)
+        dev = max(ls - st, st - max(le, ls), 0.0)
+        if sub_f[k] is not None:
+            dev = max(dev, abs(sub_f[k] / fps - st))
+        return dev
+
     checked = 0
     for s in sentences:
         head = align_global.normalize(s.get("text") or "")
@@ -4388,18 +4686,26 @@ def _timeline_checks(ctx, data):
                 break
         if not hits:
             continue
-        li = min((line_of[k] for k in hits),
-                 key=lambda x: abs(line_start[x] / fps - st))
+        # 选哪一处仍按改前的口径（行起点离句子时间最近的那一行），只把"怎么算偏差"换掉——
+        # 若按新偏差挑，开头重复的句子在字幕整体错位时会被别处的同样开头"救回来"，反而漏报。
+        li = min((line_of[x] for x in hits), key=lambda x: abs(line_start[x] / fps - st))
+        k = min((x for x in hits if line_of[x] == li), key=lambda x: deviation(x, st))
         checked += 1
         line_st = line_start[li] / fps
-        diff = abs(line_st - st)
+        diff = deviation(k, st)
         if diff > 2.0:
             ents.append({"sentence": (s.get("text") or "")[:40], "sentence_start": st,
-                         "line_no": li + 1, "line_start": line_st, "diff": diff})
+                         "line_no": li + 1, "line_start": line_st, "line_end": line_end[li] / fps,
+                         "diff": diff, "mid": k != line_first[li]})
     for e in ents[:10]:
+        if e["mid"]:
+            where = (f"所在字幕第 {e['line_no']} 行显示 {_fmt_mmss(int(e['line_start'] * fps), fps)}～"
+                     f"{_fmt_mmss(int(e['line_end'] * fps), fps)}，句首在行中间")
+        else:
+            where = f"所在字幕第 {e['line_no']} 行从 {_fmt_mmss(int(e['line_start'] * fps), fps)} 开始"
         reds.append((f"时间线：配音句子与字幕行起点偏差 {e['diff']:.1f} 秒"
                      f"（句子「{e['sentence'][:16]}」在 {_fmt_mmss(int(e['sentence_start'] * fps), fps)}，"
-                     f"所在字幕第 {e['line_no']} 行从 {_fmt_mmss(int(e['line_start'] * fps), fps)} 开始）",
+                     f"{where}）",
                      _fmt_mmss(int(e["sentence_start"] * fps), fps), None))
     if len(ents) > 10:
         reds.append((f"时间线：配音句子与字幕行起点偏差超过 2 秒共 {len(ents)} 条（上面列前 10 条）",
@@ -4407,6 +4713,15 @@ def _timeline_checks(ctx, data):
     notes.append("配音-字幕独立对照：" + ("通过" if not ents else
                                         f"{len(ents)} 条偏差超过 2 秒（核对 {checked} 句）"))
     return reds, notes
+
+
+def _last_cand(ent):
+    """MOSS 明细里这一张最终采用的那个候选（没有返回 {}）。"""
+    cands = ent.get("候选") or []
+    k = ent.get("采用第几张")
+    if isinstance(k, int) and 1 <= k <= len(cands):
+        return cands[k - 1]
+    return cands[-1] if cands else {}
 
 
 def _make_check_report(ctx, data, rendered=True):
@@ -4512,6 +4827,46 @@ def _make_check_report(ctx, data, rendered=True):
             if fc and not fc.get("上屏"):
                 tip(f"要素 {e['要素']}({e['类型']}) 画面级未上屏（{fc.get('命中')}/{fc.get('抽帧')} 帧命中）",
                     "element_frame_check", None, "logs/要素覆盖核对表.json")
+    # R120M §2.5：出图一节（只有 MOSS 方式跑过 S8 才有 logs/出图明细.json；GPT 方式没有这一节，与 1.1.0 相同）。
+    img_lines = []
+    md = moss.load_json(Path(ctx.root) / moss.DETAIL_REL)
+    if isinstance(md, dict):
+        cnt = md.get("计数") or moss.summarize(md.get("items") or [])
+        pre = md.get("出图前检查") or {}
+        be = md.get("出图方式") or moss.BACKEND_MOSS
+        rh_md = be == moss.BACKEND_MOSS_RH
+        ok_n = cnt.get('moss_first', 0) + cnt.get('moss_second', 0) + cnt.get('moss_third', 0)
+        img_lines = [f"出图方式：{moss.BACKEND_NAMES.get(be, be)}",
+                     f"风格：{md.get('风格')} {md.get('风格名') or ''}".rstrip(),
+                     f"不合格时用 GPT 补图：{'开' if md.get('不合格时用GPT补图') else '关'}"
+                     + ("（GPT 按仿 MOSS 画风的提示词出图）" if md.get("GPT仿MOSS画风") else ""),
+                     f"每张最多候选数：{md.get('每张最多候选数') or 2}",
+                     f"出图前检查：{'通过' if pre.get('ok') else ('不通过：' + str(pre.get('error')) if pre else '本次没有要新出的图，未检查')}",
+                     f"MOSS 合格：{ok_n} 张"
+                     f"（第 1 张即合格 {cnt.get('moss_first', 0)} / 第 2 张合格 {cnt.get('moss_second', 0)}"
+                     f" / 第 3 张合格 {cnt.get('moss_third', 0)}）",
+                     f"MOSS 不合格改用 GPT：{cnt.get('moss_to_gpt', 0)} 张",
+                     f"按规则走 GPT：{cnt.get('rule_gpt', 0)} 张",
+                     f"标红：{cnt.get('red', 0)} 张"]
+        if rh_md:
+            cc = md.get("RH并发") or {}
+            if cc:
+                img_lines.append(
+                    f"RH 并发：起始 {cc.get('起始并发')} 个任务同时出，最高同时 {cc.get('最高同时')} 个；"
+                    + (f"{cc.get('降级时间')} 收到 RunningHub 并发 / 队列已满，降为 1"
+                       f"（被拒后重新提交 {cc.get('被拒重提次数', 0)} 次，不算候选失败、不计 RH 币）"
+                       if cc.get("降级") else "未降级"))
+            rc = md.get("RH币消耗估") or {}
+            n_sub = rc.get("本次提交RH", cnt.get("rh_submits", 0))
+            img_lines.append(f"RH 币消耗（估）：本次提交 RunningHub {n_sub} 次 × 约 {moss.RH_COINS_PER_IMAGE} 币"
+                             f" ≈ {moss.rh_coins(n_sub)} 币（RH 币，不计入人民币费用）")
+        img_lines.append(f"逐张明细：{moss.DETAIL_REL}")
+        bad = [e for e in md.get("items") or [] if e.get("方式") == "moss_red"]
+        if bad:
+            red(f"MOSS 出图文字不合格 {len(bad)} 张：" + "、".join(
+                f"{e.get('组号')}（缺 {'／'.join(_last_cand(e).get('缺词') or []) or '无'}，"
+                f"多 {'／'.join(_last_cand(e).get('多字') or []) or '无'}）" for e in bad)
+                + "（补图开关关闭，已用缺字最少的一张）", "moss_text_failed", detail=moss.DETAIL_REL)
     still_cmds = doc.get("command_still_hits") or []
     if still_cmds:
         red(f"口播仍念命令 {len(still_cmds)} 句", "narration_command", detail="01-口播/命令重写记录.json")
@@ -4558,6 +4913,8 @@ def _make_check_report(ctx, data, rendered=True):
         lines += ["", "标红（退出码 1，不影响出片）："] + [f"  - {r}" for r in reds]
     lines += [""] + [f"- {c}" for c in checks]
     lines += ["", "## 时间线检查"] + [f"- {n}" for n in tl_notes]
+    if img_lines:
+        lines += ["", "## 出图"] + [f"- {n}" for n in img_lines]
     if tips:
         lines += ["", "提示（不影响退出码）："] + [f"  - {t}" for t in tips]
     out = ctx.p("10-报告", "检查报告.md")
@@ -4633,7 +4990,7 @@ AUDIBLE_TOL_SEC = 0.5           # 成片与配音「最后有声的时刻」允�
 
 def _audio_stream_sec(mp4):
     """ffprobe 读成片**音频流**的时长（秒）；没有音频流返回 None。"""
-    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0",
+    r = subprocess.run([paths.ffmpeg_exe("ffprobe"), "-v", "error", "-select_streams", "a:0",
                         "-show_entries", "stream=duration", "-of", "csv=p=0", str(mp4)],
                        capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -4649,7 +5006,7 @@ def _last_audible_sec(path, rate=16000, win_sec=0.01):
     （Remotion 自带的精简版 ffmpeg 没有裸 PCM 输出格式），这里自己找 `data` 块。
     """
     import array
-    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1",
+    r = subprocess.run([paths.ffmpeg_exe("ffmpeg"), "-v", "error", "-i", str(path), "-map", "0:a:0", "-ac", "1",
                         "-ar", str(rate), "-c:a", "pcm_s16le", "-f", "wav", "-"],
                        capture_output=True, timeout=600)
     if r.returncode != 0:
@@ -4772,7 +5129,8 @@ def step_s10(ctx):
     out_mp4 = out_dir / f"{ctx.article}.mp4"
     _progress(ctx, "S10", 0, 100, "%", "渲染")
     _run_render(rp, out_mp4, concurrency=4,
-                progress=lambda pct: _progress(ctx, "S10", min(pct, 99), 100, "%", "渲染"))
+                progress=lambda pct: _progress(ctx, "S10", min(pct, 99), 100, "%", "渲染"),
+                log=ctx.log)
     _progress(ctx, "S10", 100, 100, "%", "渲染完成")
     ctx.log(f"[S10] 成片 -> {out_mp4} ({out_mp4.stat().st_size} 字节)")
     stopflag.check()       # P31b：渲染后的几项核对各要十几秒，开始前各看一次停止标记

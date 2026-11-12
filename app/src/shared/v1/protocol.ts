@@ -51,7 +51,8 @@ export interface StepProgressEvent extends BaseEvent {
 export interface StepDoneEvent extends BaseEvent { event: 'step_done'; step: string; name?: string; estimated_cny?: number; content_type?: string }
 
 // service：约定 v5.3 第 2.8 节，失败来自哪家外部服务（null = 不来自外部服务；旧引擎没有这个字段）
-export interface StepFailEvent extends BaseEvent { event: 'step_fail'; step: string; error_kind: string; name?: string; service?: string | null }
+// R120M P3：provider_message = 服务商返回的原始错误信息（引擎已脱敏、截断到 300 字；只在失败来自外部服务时有）
+export interface StepFailEvent extends BaseEvent { event: 'step_fail'; step: string; error_kind: string; name?: string; service?: string | null; provider_message?: string | null }
 
 export interface EstimateRange { low_cny: number; high_cny: number }
 
@@ -61,6 +62,8 @@ export interface EstimateEvent extends BaseEvent {
   high_cny: number
   by_service: Record<string, EstimateRange & { service_name: string; price_estimated: boolean }>
   saved_by_cache_cny: number
+  // R120M3：MOSS · RH 云端另估的 RH 币（不计入人民币费用）；其他出图方式没有这一项
+  rh_coins?: { low: number; high: number; per_image: number; note?: string }
   basis: {
     chars?: number
     images?: number
@@ -88,6 +91,7 @@ export interface RunDoneEvent extends BaseEvent {
   article?: string
   error_kind?: string
   service?: string | null
+  provider_message?: string | null
   missing_keys?: string[]
   report_json?: string | null
   delivery_path?: string | null

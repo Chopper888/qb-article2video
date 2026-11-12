@@ -28,10 +28,14 @@ KIND_DISK_FULL = "disk_full"
 KIND_ALREADY_RUNNING = "already_running"
 KIND_INTERRUPTED = "interrupted"
 KIND_INTERNAL = "internal"
+# R120M：MOSS 本地出图的两种失败（出图前检查不通过就早停）
+KIND_COMFYUI_DOWN = "comfyui_unavailable"       # 本地 ComfyUI 连不上（没启动 / 地址不对）
+KIND_MOSS_SETUP = "moss_setup_incomplete"       # ComfyUI 缺节点或缺模型文件
 
 ERROR_KINDS = (KIND_INPUT_INVALID, KIND_KEY_MISSING, KIND_KEY_INVALID, KIND_BALANCE,
                KIND_NETWORK, KIND_SERVICE, KIND_COST_LIMIT, KIND_PAID_BLOCKED, KIND_RENDER,
-               KIND_DISK_FULL, KIND_ALREADY_RUNNING, KIND_INTERRUPTED, KIND_INTERNAL)
+               KIND_DISK_FULL, KIND_ALREADY_RUNNING, KIND_INTERRUPTED, KIND_INTERNAL,
+               KIND_COMFYUI_DOWN, KIND_MOSS_SETUP)
 
 
 # P31：外部服务键，与 `estimate.by_service` 一致；`check-keys` 的 `tts` 即 `doubao_speech`。
@@ -40,7 +44,9 @@ SERVICE_ARK = "ark"
 SERVICE_SPEECH = "doubao_speech"
 SERVICE_RUNNINGHUB = "runninghub"
 SERVICE_FEISHU = "feishu"
-SERVICES = (SERVICE_DEEPSEEK, SERVICE_ARK, SERVICE_SPEECH, SERVICE_RUNNINGHUB, SERVICE_FEISHU)
+SERVICE_COMFYUI = "comfyui"          # R120M：用户本机的 ComfyUI（MOSS 本地出图，不花钱、没有密钥）
+SERVICES = (SERVICE_DEEPSEEK, SERVICE_ARK, SERVICE_SPEECH, SERVICE_RUNNINGHUB, SERVICE_FEISHU,
+            SERVICE_COMFYUI)
 # 计价 / 密钥检测里的别名 → 事件里的服务键
 _SERVICE_ALIASES = {"runninghub_app": SERVICE_RUNNINGHUB, "tts": SERVICE_SPEECH}
 # 密钥环境变量 → 服务
@@ -187,3 +193,68 @@ def http_kind(status, body=""):
     if status in (401, 403):
         return KIND_KEY_INVALID
     return None
+
+
+# --------------------------------------------------------------------------
+# R120M P3：失败事件带上服务商返回的原始错误信息（截断到 300 字、脱敏），供 APP 提示条与诊断报告用
+# --------------------------------------------------------------------------
+
+PROVIDER_MESSAGE_MAX = 300
+# 这几种失败才可能有"服务商的原话"；本地原因（费用上限、渲染、磁盘满……）不带。
+_PROVIDER_KINDS = (KIND_KEY_INVALID, KIND_BALANCE, KIND_NETWORK, KIND_SERVICE,
+                   KIND_COMFYUI_DOWN, KIND_MOSS_SETUP)
+
+
+def redact(text):
+    """去掉形似密钥 / token 的字符串，用户主目录换成 %USERPROFILE%。"""
+    import os
+    import re
+    s = str(text or "")
+    homes = {os.path.expanduser("~"), os.environ.get("USERPROFILE") or "", os.environ.get("HOME") or ""}
+    for h in sorted((h for h in homes if h and len(h) > 3), key=len, reverse=True):
+        for v in {h, h.replace("\\", "/"), h.replace("/", "\\")}:
+            s = re.sub(re.escape(v), "%USERPROFILE%", s, flags=re.IGNORECASE)
+    s = re.sub(r"(?i)\b(bearer)(\s+)[A-Za-z0-9._\-+/=]{6,}", r"\1\2[已隐藏]", s)
+    s = re.sub(r"(?i)\b(authorization|api[_-]?key|access[_-]?token|token|secret|appkey|app_?secret|password)"
+               r"([\"']?\s*[:=]\s*[\"']?|\s+[\"']?)(?!bearer\b)(?!\[已隐藏\])([A-Za-z0-9._\-+/=]{6,})",
+               r"\1\2[已隐藏]", s)
+    s = re.sub(r"\bsk-[A-Za-z0-9_\-]{8,}", "[已隐藏]", s)
+    # 长串字母数字（≥24 位、同时含字母和数字）按密钥处理；纯数字的任务号保留（排查要用）。
+    s = re.sub(r"\b(?=[A-Za-z0-9_\-]*[A-Za-z])(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{24,}\b", "[已隐藏]", s)
+    return s
+
+
+# R120M2 Q1.3：渲染失败时带渲染输出的最后 30 行（抛错处放在 provider_raw）；保留结尾，超长从前面截。
+RENDER_MESSAGE_MAX = 4000
+
+
+def _render_tail_message(exc):
+    raw = None
+    for e in _chain(exc):
+        raw = getattr(e, "provider_raw", None)
+        if raw:
+            break
+    raw = redact(raw or "").strip()
+    if not raw:
+        return None
+    return raw if len(raw) <= RENDER_MESSAGE_MAX else "…" + raw[-(RENDER_MESSAGE_MAX - 1):]
+
+
+def provider_message(exc, kind):
+    """失败来自外部服务时，异常里服务商的原话（脱敏后截断到 300 字）；否则 None。
+    渲染失败：只在抛错处带了渲染输出（provider_raw）时返回它（脱敏，最多 4000 字）。"""
+    if kind == KIND_RENDER and exc is not None:
+        return _render_tail_message(exc)
+    if kind not in _PROVIDER_KINDS or exc is None:
+        return None
+    raw = None
+    for e in _chain(exc):
+        raw = getattr(e, "provider_raw", None)
+        if raw:
+            break
+    if not raw:
+        raw = str(exc)
+    raw = redact(raw).strip()
+    if not raw:
+        return None
+    return raw if len(raw) <= PROVIDER_MESSAGE_MAX else raw[:PROVIDER_MESSAGE_MAX - 1] + "…"

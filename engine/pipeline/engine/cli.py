@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 from pipeline.engine import (errors, estimate, events, feishu_read, imagegen, intake, keycheck, ledger,
-                             netretry, paths, spec, stopflag, tempdir)
+                             moss, netretry, paths, spec, stopflag, tempdir)
 from pipeline.engine import steps as steps_mod
 from pipeline.engine.steps import Ctx, StepError
 
@@ -82,9 +82,10 @@ _LOCK_FILENAME = ".run.lock"
 def _pid_is_python(pid):
     """Windows 下判断 PID 是否仍存活且是 python 进程（tasklist 查映像名）。"""
     try:
+        # R120M2：与 tempdir._pid_alive 一样按系统码页（mbcs）解码、errors=replace（tasklist 是系统自带程序）
         r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                           capture_output=True, text=True, timeout=10)
-        return "python" in r.stdout.lower()
+                           capture_output=True, timeout=10, **tempdir._TASKLIST_DECODE)
+        return "python" in (r.stdout or "").lower()
     except Exception:
         return False
 
@@ -174,7 +175,12 @@ def _git_code_version():
 
     「相关代码」= `pipeline\\` 下的一切（`pipeline\\engine\\` 与各步骤调用到的模块），
     含未跟踪的新文件——一个还没提交的引擎不该被当成干净版本对外声明。
+
+    R120M2：打包模式（运行包里没有 .git，用户电脑也未必装 git）直接返回 None，不去 PATH 里找 git；
+    以前在打包模式下 git 不存在 / 不是仓库时同样得到 None，结果不变。
     """
+    if paths.is_packaged():
+        return None
     try:
         r = subprocess.run(["git", "-C", str(paths.ENGINE_ROOT), "rev-parse", "--short", "HEAD"],
                            capture_output=True, text=True, timeout=10)
@@ -252,8 +258,16 @@ def _render_source_fingerprint():
     return h.hexdigest()
 
 
+# R121M §2：S9 的隐式输入——S8 记下的出图方式（MOSS 方式时插画场景写全屏标记）。只在文件存在时并进
+# 指纹：GPT 方式没有这个文件，指纹与 plan 里声明的输入清单都与 1.2.0 相同；换出图方式时 S9 跟着重跑。
+S9_EXTRA_INPUTS = ("07-出图/出图方式.json",)
+
+
 def _fingerprint(root, sid, steps):
-    fp = ledger.fingerprint(root, ledger.expand(root, steps[sid]["in"]))
+    rels = ledger.expand(root, steps[sid]["in"])
+    if sid == "S9":
+        rels = sorted(set(rels) | set(ledger.expand(root, list(S9_EXTRA_INPUTS))))
+    fp = ledger.fingerprint(root, rels)
     if sid == "S10":
         import hashlib
         h = hashlib.sha256()
@@ -635,10 +649,13 @@ def cmd_status(args, emitter):
 
 
 def _image_service_error(emitter):
-    """ST3-P27：内部环境变量 `A2V_IMAGE_SERVICE` 写错 → 发 run_done（退出码 4、argument_error）并返回退出码。"""
+    """ST3-P27：内部环境变量 `A2V_IMAGE_SERVICE` 写错 → 发 run_done（退出码 4、argument_error）并返回退出码。
+
+    R120M：出图设置（`A2V_IMAGE_BACKEND` / `A2V_MOSS_STYLE` / `A2V_COMFYUI_URL` / `A2V_MOSS_FALLBACK_GPT`）写错同样处理。"""
     try:
         imagegen.selected()
-    except imagegen.ServiceConfigError as e:
+        moss.config()
+    except (imagegen.ServiceConfigError, moss.ConfigError) as e:
         emitter.emit(events.EVENT_RUN_DONE, None, f"配置错误：{e}", exit_code=EXIT_CONFIG,
                      reason=REASON_ARGUMENT_ERROR, error_kind=errors.KIND_INTERNAL)
         return EXIT_CONFIG
@@ -657,7 +674,10 @@ def cmd_estimate(args, emitter):
     est = estimate.estimate(root, args.article, ct)
     emitter.emit(events.EVENT_ESTIMATE, None,
                  f"预计花费 ¥{est['low_cny']:.2f}～¥{est['high_cny']:.2f}"
-                 + (f"（已有缓存省下约 ¥{est['saved_by_cache_cny']:.2f}）" if est["saved_by_cache_cny"] else ""),
+                 + (f"（已有缓存省下约 ¥{est['saved_by_cache_cny']:.2f}）" if est["saved_by_cache_cny"] else "")
+                 # R120M3：MOSS · RH 另估 RH 币（不计入人民币费用）；GPT / MOSS 本地没有这一段，与以前相同
+                 + (f"；另消耗 RH 币约 {est['rh_coins']['low']}～{est['rh_coins']['high']}（不计入人民币费用）"
+                    if est.get("rh_coins") and est["rh_coins"].get("high") else ""),
                  **est)
     emitter.emit(events.EVENT_RUN_DONE, None, f"estimate 完成（内容类型 {ct}：{reason}）",
                  content_type=ct, exit_code=EXIT_OK)
@@ -727,6 +747,9 @@ def _keys_needed(root, order, res, steps):
             continue
         if s2 == "S0" and not steps_mod.s0_needs_vision(root):
             continue
+        if s2 == "S8" and moss.selected_or_gpt().moss and not moss.selected_or_gpt().rh:
+            continue      # R120M：MOSS 本地出图不要密钥；要 GPT 补图 / 按规则走 GPT 时才在 S8 里要 RunningHub 的
+        # R120M3：MOSS · RH 云端要 RunningHub 密钥（与 GPT 方式相同，照常检查）
         need |= set(spec.PAID_KEYS.get(s2, []))
     return need
 
@@ -745,23 +768,28 @@ def _safe_save(root, doc, log=None):
         return False
 
 
-def _fail_step(emitter, root, doc, ctx, sid, msg, kind, t0, ct, close, service=None):
+def _fail_step(emitter, root, doc, ctx, sid, msg, kind, t0, ct, close, service=None, exc=None):
     """步骤失败：账本记 failed（尽力而为），发 step_fail + run_done（退出码 2，带 error_kind、service）。"""
     try:
         _pull_pending_jobs(root, doc)
     except Exception:
         pass
+    # R120M P3：服务商的原始错误信息（脱敏、截断到 300 字）；只在失败来自外部服务时带。
+    pm = errors.provider_message(exc, kind) if exc is not None else None
+    extra = {"provider_message": pm} if pm else {}
     try:
+        # R120M P2：失败原因也记进账本这一步（APP 的诊断报告读"最近 5 个任务"时用；成功的步骤没有这几栏）
         ledger.upsert_step(doc, sid, status=STATUS_FAILED, message=msg,
                            duration_sec=round(time.time() - t0, 1),
+                           error_kind=kind, service=service, provider_message=pm,
                            **_paid_fields(ctx, doc, sid))
     except Exception:
         pass
     _safe_save(root, doc, ctx.log)
-    emitter.emit(events.EVENT_STEP_FAIL, sid, msg, error_kind=kind, service=service)
+    emitter.emit(events.EVENT_STEP_FAIL, sid, msg, error_kind=kind, service=service, **extra)
     emitter.emit(events.EVENT_RUN_DONE, None, f"执行失败于 {sid}",
                  content_type=ctx.resolved_content_type or ct, exit_code=EXIT_EXEC,
-                 error_kind=kind, service=service)
+                 error_kind=kind, service=service, **extra)
     close()
     return EXIT_EXEC
 
@@ -995,7 +1023,7 @@ def cmd_run(args, emitter):
                 msg = str(e) if isinstance(e, StepError) else f"{type(e).__name__}: {e}"
                 kind = errors.classify(e, sid)
                 return _fail_step(emitter, root, doc, ctx, sid, msg, kind,
-                                  t0, ct, close, service=errors.failure_service(e, kind))
+                                  t0, ct, close, service=errors.failure_service(e, kind), exc=e)
             outs = ledger.expand(root, steps[sid]["out"])
             if not outs:
                 msg = f"步骤未产出声明的产物: {steps[sid]['out']}"
@@ -1127,6 +1155,11 @@ def cmd_run(args, emitter):
         problems.append("成片声音与本次配音不符")
     if still_cmds:
         problems.append(f"口播仍念命令 {len(still_cmds)} 句")
+    # R120M：MOSS 两张都不合格、补图开关关着时用了缺字最少的一张（检查报告标红；GPT 方式没有这个文件）。
+    moss_red = [e.get("组号") for e in ((moss.load_json(Path(root) / moss.DETAIL_REL) or {}).get("items") or [])
+                if isinstance(e, dict) and e.get("方式") == "moss_red"]
+    if moss_red:
+        problems.append(f"MOSS 出图文字不合格 {len(moss_red)} 张 {', '.join(str(g) for g in moss_red)}")
     exit_code = EXIT_CHECK if problems else EXIT_OK
     msg = ("运行结束（检查标红：" + "；".join(problems) + "）" if problems else "运行结束")
     if stale_notes:

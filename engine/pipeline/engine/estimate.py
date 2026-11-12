@@ -19,7 +19,7 @@ import json
 import re
 from pathlib import Path
 
-from pipeline.engine import imagegen, intake, ledger, paid, pricing, spec
+from pipeline.engine import imagegen, intake, ledger, moss, paid, pricing, spec
 
 # 由 ST3-P8 四篇（001-示例篇、002-示例篇-截图、59-ST3F1、72-ST3F3）校准的系数（低, 高）。
 # 校准数据和对比表见 ST3-P23 回执 §7。
@@ -46,6 +46,20 @@ TOKENS = {
     "s1_reasoning": (1000, 20000),              # 口播开了深度思考，思考内容按输出计
 }
 DEEPSEEK_LOW_FACTOR = 0.5                       # 低值按 DeepSeek 空闲时段价（高峰价的一半）
+
+# R120M §2.4：MOSS 本地出图时 S8 的估算。低值 ¥0；高值 =（按规则走 GPT 的张数 + 全部张数 × 补图比例）× GPT 单价。
+MOSS_FALLBACK_SHARE = 0.05                      # 预计补图比例（取 5%；实测跑 2 挑 1 合格率 97～98.5%）
+# 还没有出图需求时，按规则走 GPT 的张数按总张数的这个比例估（本机 31 篇历史出图需求里
+# 标注文字为空或多于 8 个的占 38/2016 ≈ 1.9%，偏宽取 5%）。
+MOSS_RULE_SHARE_HI = 0.05
+MOSS_NOTE = "MOSS 本地出图不花钱，少数图可能需要 GPT 补图"
+# R120M3：MOSS · RH 云端不计人民币，另估 RH 币（张数 × moss.RH_COINS_PER_IMAGE）。
+MOSS_RH_NOTE = "MOSS · RH 云端出图消耗 RH 币（不计入人民币费用），少数图可能需要 GPT 补图"
+RH_COINS_NOTE = "RH 币，不计入人民币费用；按每张提交 1 次估，候选不合格时会多用（每张最多 3 次）"
+
+
+def _moss_note(cfg):
+    return MOSS_RH_NOTE if cfg.rh else MOSS_NOTE
 
 SERVICES = ("deepseek", "ark", "doubao_speech", "runninghub")
 # ST3-P27：输出里出图那一栏的键仍是 `runninghub`（APP 已认），单价按当前选的出图服务
@@ -138,6 +152,67 @@ def _illus_remaining(root):
     return len(items), left
 
 
+def _illus_remaining_moss(root, cfg):
+    """MOSS 方式、已有出图需求时：(总张数, 要出的 MOSS 张数, 要出的按规则走 GPT 张数)。没有清单返回 None。
+
+    与 S8 同一判定：MOSS 的图按 moss.item_key 判断旧图能不能用；按规则走 GPT 的图按 GPT 的键，并查 GPT 缓存。"""
+    p = Path(root) / "06-编排" / "出图需求.json"
+    if not p.is_file():
+        return None
+    try:
+        items = [it for it in json.loads(p.read_text(encoding="utf-8")).get("items") or []
+                 if it.get("请求内容哈希") and it.get("文件名")]
+    except Exception:
+        return None
+    from pipeline.engine import steps as st
+    routes = {it["文件名"]: moss.route(it, cfg) for it in items}
+
+    def eff(it):
+        r = routes[it["文件名"]]
+        if r.moss:
+            return dict(it, 请求内容哈希=r.item_key)
+        return r.gpt_item(it)        # R120M3：按规则走 GPT 的图按它实际用的提示词（仿 MOSS 或原样）
+    plan = st.illustration_plan(root, [eff(it) for it in items])
+    cache = Path(root) / "07-出图" / "cache"
+    n_moss = n_rule = 0
+    for it in items:
+        if plan.get(it["文件名"]) == "reuse":
+            continue
+        if routes[it["文件名"]].moss:
+            n_moss += 1
+        elif not paid.load_cached(cache, eff(it)["请求内容哈希"])[0]:
+            n_rule += 1
+    return len(items), n_moss, n_rule
+
+
+def _moss_s8(acc, root, cfg, known_n, up, fresh):
+    """R120M §2.4：MOSS 方式的 S8 估算。known_n：还没有出图需求时按分组推出的张数 (低, 高)。"""
+    got = None if fresh else _illus_remaining_moss(root, cfg)
+    note = _moss_note(cfg)
+    if got is not None:
+        total, n_moss, n_rule = got
+        hi = n_rule + n_moss * MOSS_FALLBACK_SHARE
+        acc.add("S8", "runninghub", 0.0, hi * up,
+                f"{note}：出图需求 {total} 张，要出的 {n_moss + n_rule} 张"
+                f"（MOSS {n_moss} 张，按规则走 GPT {n_rule} 张）；高值 = 按规则走 GPT {n_rule} 张"
+                f" + MOSS {n_moss} 张 × 补图比例 {int(MOSS_FALLBACK_SHARE * 100)}%")
+        acc.illus = (n_moss + n_rule, n_moss + n_rule)
+        m_lo = m_hi = n_moss
+    else:
+        n_lo, n_hi = known_n
+        hi = n_hi * (MOSS_RULE_SHARE_HI + MOSS_FALLBACK_SHARE)
+        acc.add("S8", "runninghub", 0.0, hi * up,
+                f"{note}：出图 {_fmt(n_lo)}～{_fmt(n_hi)} 张；高值 = 按规则走 GPT（约"
+                f" {int(MOSS_RULE_SHARE_HI * 100)}%）+ 补图（{int(MOSS_FALLBACK_SHARE * 100)}%）")
+        acc.illus = (n_lo, n_hi)
+        m_lo, m_hi = n_lo, n_hi
+    acc.by_step["S8"]["note"] = note
+    if cfg.rh:
+        acc.rh_coins = (int(round(m_lo)) * moss.RH_COINS_PER_IMAGE, int(round(m_hi)) * moss.RH_COINS_PER_IMAGE)
+        acc.by_step["S8"]["rh_coins"] = {"low": acc.rh_coins[0], "high": acc.rh_coins[1],
+                                         "per_image": moss.RH_COINS_PER_IMAGE, "note": RH_COINS_NOTE}
+
+
 def replay_narration(root, article):
     """R101 K：口播能不能从缓存原样回放（清理过中间文件的文章 narration.txt 没了，但 01-口播/cache 还在）。
 
@@ -166,10 +241,10 @@ def _tts_remaining(root, narration=None):
     if narration is None and not p.is_file():
         return None
     text = st._tts_text(narration + "\n" if narration is not None else p.read_text(encoding="utf-8"))
-    key = paid.cache_key(st._SPEECH_MODEL, text,
-                         {"service": "doubao-speech", "speaker": st.tts_speaker(),
-                          "speech_rate": st._TTS_SPEECH_RATE, "sample_rate": 24000, "format": "wav"})
-    return _nonspace(text), paid.load_cached(Path(root) / "03-配音" / "cache", key)[0]
+    # R121M2：1.2.0 整篇缓存在 → 全部已缓存；否则按段看流式缓存。字数口径不变（整篇非空白字数），
+    # 只有一部分段已缓存时不算「已缓存」，仍按整篇字数估（偏保守，与 1.2.0 相同）。
+    _left, cached = st.tts_cache_state(root, text)
+    return _nonspace(text), cached
 
 
 # R101 K：口播、配音都能从缓存原样回放时，下面这几步的请求预计与上次完全相同。
@@ -348,8 +423,15 @@ def estimate(root, article, ct_preview, fresh=False):
                    + ("与逐句标注" if ct == spec.CONTENT_TYPE_SCREENSHOT else ""))
         # S8：出图
         up = pricing.unit_price_cny(_price_key(IMAGE_BUCKET))
-        known = None if fresh else _illus_remaining(root)
-        if known is None and "S8" in run and "S8" in hit_like:
+        mcfg = moss.selected_or_gpt()
+        known = None if fresh or mcfg.moss else _illus_remaining(root)
+        if mcfg.moss:
+            # R120M：MOSS 本地出图。S8 要跑（或上游重跑可能带着它重跑）时才估；GPT 方式走下面原有的分支。
+            if "S8" in run:
+                k = "illus_per_group_shot" if ct == spec.CONTENT_TYPE_SCREENSHOT else "illus_per_group_theory"
+                lo, hi = RATIOS[k]
+                _moss_s8(acc, root, mcfg, (lo * G[0], hi * G[1]), up, fresh or "S7" in run)
+        elif known is None and "S8" in run and "S8" in hit_like:
             prev, cached = _prev_images_cached(root)
             left = prev - cached
             acc.add("S8", "runninghub", left * up, left * up,
@@ -409,9 +491,21 @@ def estimate(root, article, ct_preview, fresh=False):
             "groups": [int(G[0]), int(G[1])], "groups_exact": exact_g is not None,
             "illustrations": _illus_range(results, G),
             "fresh": bool(fresh),
+            **({"image_backend": moss.selected_or_gpt().backend, "moss_style": moss.selected_or_gpt().style,
+                "image_note": _moss_note(moss.selected_or_gpt())} if moss.selected_or_gpt().moss else {}),
         },
+        **({"rh_coins": _rh_coins_total(results)} if moss.selected_or_gpt().rh else {}),
         "prices": {s: pricing.describe(_price_key(s)) for s in SERVICES},
     }
+
+
+def _rh_coins_total(results):
+    """R120M3：MOSS · RH 的 RH 币消耗（估）。S8 这一轮不跑时为 0。"""
+    got = [getattr(a, "rh_coins", None) for _, a, _ in results]
+    got = [g for g in got if g]
+    lo = min(g[0] for g in got) if got else 0
+    hi = max(g[1] for g in got) if got else 0
+    return {"low": lo, "high": hi, "per_image": moss.RH_COINS_PER_IMAGE, "note": RH_COINS_NOTE}
 
 
 def _illus_range(results, G):
@@ -419,6 +513,9 @@ def _illus_range(results, G):
     for ct, acc, _ in results:
         s8 = acc.by_step.get("S8")
         if not s8:
+            continue
+        if getattr(acc, "illus", None) is not None:      # R120M：MOSS 方式按张数记，不按 GPT 金额折算
+            out.append(acc.illus)
             continue
         up = pricing.unit_price_cny(_price_key(IMAGE_BUCKET))
         out.append((s8["low_cny"] / up, s8["high_cny"] / up))

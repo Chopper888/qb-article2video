@@ -97,6 +97,10 @@ def _is_running(p):
     return pid is not None and _pid_alive(pid)
 
 
+# Windows 上 tasklist 输出的解码方式（非 Windows 不会走到 tasklist，保持原样）。
+_TASKLIST_DECODE = {"encoding": "mbcs", "errors": "replace"}
+
+
 def _pid_alive(pid):
     if pid <= 0:
         return False
@@ -107,8 +111,15 @@ def _pid_alive(pid):
         except OSError:
             return False
     try:
+        # R120M P4（R110W 已知问题②）：tasklist 按系统 ANSI 码页输出，`PYTHONUTF8=1` 下按 UTF-8 解码会失败。
+        # 显式按 mbcs 解码、解不了的字节替换掉（PID 是 ASCII 数字，不受影响）。
         r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, timeout=10, **_TASKLIST_DECODE)
     except Exception:
         return True  # 查不了时保守当作还在跑，宁可不删
+    # R110M P4：`PYTHONUTF8=1` 下 tasklist 的 OEM 码页输出按 UTF-8 解码可能失败，
+    # 某些环境里 r.stdout 会是 None（而非空串），`"pid" in None` 会抛 TypeError。
+    # 查不出结果时同样保守当作还在跑，绝不因此误删目录。
+    if r.stdout is None:
+        return True
     return f'"{pid}"' in r.stdout

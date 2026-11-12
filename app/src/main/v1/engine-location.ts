@@ -18,11 +18,13 @@ export interface EngineLocation {
   // APP2：run 的 --runtime-dir（node_modules + 字体）和 ffmpeg 所在目录（启动引擎时放到 PATH 最前面）
   runtimeDir?: string | null
   ffmpegDir?: string | null
+  // R120M2 Q1：运行包自带的 node 可执行文件（绝对路径），经 A2V_NODE 交给引擎渲染用；开发模式不设时引擎自己找
+  nodePath?: string | null
 }
 
 export function resolveDevEngineLocation(resourcesRoot: string, env: NodeJS.ProcessEnv = process.env, home: string = homedir(),
   read: (file: string) => string = file => readFileSync(file, 'utf8')): EngineLocation {
-  let config: { engineRoot?: unknown; python?: unknown; runtimeDir?: unknown; ffmpegDir?: unknown } = {}
+  let config: { engineRoot?: unknown; python?: unknown; runtimeDir?: unknown; ffmpegDir?: unknown; nodePath?: unknown } = {}
   try { config = JSON.parse(read(join(resourcesRoot, '.cache', 'a2v-engine.local.json'))) as typeof config } catch { /* 没有就用默认 */ }
   const pick = (...values: unknown[]): string | null => {
     for (const value of values) if (typeof value === 'string' && value.trim() && isAbsolute(value.trim())) return value.trim()
@@ -32,7 +34,8 @@ export function resolveDevEngineLocation(resourcesRoot: string, env: NodeJS.Proc
     root: pick(env.A2V_ENGINE_ROOT, config.engineRoot, join(home, 'dev', 'a2v-engine-p32')),
     python: pick(env.A2V_ENGINE_PYTHON, config.python, process.platform === 'win32' ? null : join(home, 'dev', 'a2v-venv', 'bin', 'python')),
     runtimeDir: pick(env.A2V_RUNTIME_DIR, config.runtimeDir, process.platform === 'win32' ? null : join(home, 'dev', 'a2v-runtime')),
-    ffmpegDir: pick(env.A2V_FFMPEG_DIR, config.ffmpegDir, process.platform === 'win32' ? null : join(home, 'dev', 'a2v-runtime', 'bin'))
+    ffmpegDir: pick(env.A2V_FFMPEG_DIR, config.ffmpegDir, process.platform === 'win32' ? null : join(home, 'dev', 'a2v-runtime', 'bin')),
+    nodePath: pick(env.A2V_NODE, config.nodePath)
   }
 }
 

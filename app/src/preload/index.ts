@@ -3,6 +3,7 @@ import { IPC } from '../shared/ipc'
 import type { AppApi, AppSettings, AppState, CreateTaskInput } from '../shared/types'
 import { IPC_V1, mediaUrl } from '../shared/v1/ipc'
 import type { RuntimePrep, SessionEnd, SessionEvent, V1Api, V1Prefs } from '../shared/v1/types'
+import type { UpdateState } from '../shared/v1/auto-update'
 
 const api: AppApi = {
   getEnvironmentReadiness: () => ipcRenderer.invoke(IPC.getEnvironmentReadiness),
@@ -61,6 +62,16 @@ const v1: V1Api = {
   diskUsage: () => ipcRenderer.invoke(IPC_V1.diskUsage),
   cleanupPreview: () => ipcRenderer.invoke(IPC_V1.cleanupPreview),
   exportDiagnostics: () => ipcRenderer.invoke(IPC_V1.exportDiagnostics),
+  exportDiagnosticsReport: () => ipcRenderer.invoke(IPC_V1.exportDiagnosticsReport),
+  checkUpdate: (manual: boolean) => ipcRenderer.invoke(IPC_V1.checkUpdate, manual),
+  openUpdateLink: (which: 'github' | 'quark') => ipcRenderer.invoke(IPC_V1.openUpdateLink, which),
+  getUpdateState: () => ipcRenderer.invoke(IPC_V1.getUpdateState),
+  downloadUpdate: () => ipcRenderer.invoke(IPC_V1.downloadUpdate),
+  installUpdate: () => ipcRenderer.invoke(IPC_V1.installUpdate),
+  laterUpdate: () => ipcRenderer.invoke(IPC_V1.laterUpdate),
+  skipUpdate: () => ipcRenderer.invoke(IPC_V1.skipUpdate),
+  retryUpdate: () => ipcRenderer.invoke(IPC_V1.retryUpdate),
+  onUpdateState: subscribe<UpdateState>(IPC_V1.updateState),
   getRuntimePrep: () => ipcRenderer.invoke(IPC_V1.getRuntimePrep),
   retryRuntimePrep: () => ipcRenderer.invoke(IPC_V1.retryRuntimePrep),
   onRuntimePrep: subscribe<RuntimePrep>(IPC_V1.runtimePrep),

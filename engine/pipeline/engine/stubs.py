@@ -7,9 +7,11 @@ docstring 里的「依据」——回执 §A 逐个列出（文件 + 行号）�
 
 本轮**零真实调用**：新文章路径全靠这些桩跑通；两篇样本靠缓存回放/导入。
 """
+import base64
 import hashlib
 import io
 import json
+import re
 import wave
 from pathlib import Path
 
@@ -116,6 +118,52 @@ def stub_tts(text):
         t = st
     total = out[-1]["endTime"] if out else CHAR_SEC
     return {"sentences": out, "audio_seconds": total}
+
+
+STREAM_LEAD_SEC = 0.1      # 流式桩每段开头的留白（真实接口文档示例首字从 0.195 秒开始）
+STREAM_TAIL_SEC = 0.1
+STREAM_FRAME_BYTES = 9600  # 每帧音频 0.2 秒（24000 Hz × 16 bit）
+
+
+def stub_tts_stream_frames(text, frame_bytes=STREAM_FRAME_BYTES):
+    """R121M2 配音桩：按「单向流式语音合成（HTTP）」文档的响应格式给出一段文本的回复帧（bytes 列表）。
+
+    依据：文档响应示例——每帧一个 JSON：`{"code":0,"message":"OK","data":"<base64 音频块>"}`；
+    每句一帧 `{"code":0,"sentence":{"text","words":[{"word","startTime","endTime","confidence"}]}}`
+    （时间单位秒、从这一段音频的开头算起）；最后一帧带 `usage.text_words`（计费字数，含标点）。
+    音频是静音 PCM（单声道 / 16 bit / 24000 Hz），时长与字级时间戳相称；帧之间用换行隔开。
+    """
+    text = (text or "").strip()
+    sents, buf = [], ""
+    for ch in text:
+        buf += ch
+        if ch in "。！？!?；":
+            sents.append(buf)
+            buf = ""
+    if buf:
+        sents.append(buf)
+    frames_sent, t = [], STREAM_LEAD_SEC
+    for s in sents:
+        words = []
+        for ch in s:
+            if ch.isspace():
+                continue
+            words.append({"confidence": 0.9, "endTime": round(t + CHAR_SEC, 3), "startTime": round(t, 3),
+                          "word": ch})
+            t += CHAR_SEC
+        if words:
+            frames_sent.append({"code": 0, "message": "", "sentence": {"phonemes": [], "text": s, "words": words}})
+    n = int(round((t + STREAM_TAIL_SEC) * TTF_RATE))
+    pcm = b"\x00\x00" * n
+    out = []
+    for i in range(0, len(pcm), frame_bytes):
+        out.append(json.dumps({"code": 0, "message": "", "data": base64.b64encode(pcm[i:i + frame_bytes]).decode()}))
+    # 句子帧插在音频帧之间（真实接口一句念完给一次时间戳）
+    for k, f in enumerate(frames_sent):
+        out.insert(min(len(out), (k + 1) * max(1, len(out) // max(1, len(frames_sent)))), json.dumps(f, ensure_ascii=False))
+    out.append(json.dumps({"code": 20000000, "message": "ok", "data": None,
+                           "usage": {"text_words": len(re.sub(r"\s", "", text))}}))
+    return [(ln + "\n").encode("utf-8") for ln in out]
 
 
 # --------------------------------------------------------------------------
